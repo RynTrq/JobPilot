@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import parse_qs
+from urllib.parse import parse_qsl
+from urllib.parse import urlencode
+from urllib.parse import urljoin
+from urllib.parse import urlparse
+from urllib.parse import urlunparse
 
+from bs4 import BeautifulSoup
 import structlog
 
 from backend.scraping.adapters.base import AdapterBase
+from backend.scraping.adapters.base import JobListing
 from backend.scraping.adapters.base import SubmitResult
 from backend.scraping.browser import goto_with_pacing
 from backend.scraping.job_list import discover_job_links
@@ -25,6 +33,18 @@ LOAD_MORE_SELECTORS = (
     "a:has-text('View more')",
 )
 MAX_LOAD_MORE_CLICKS = 30
+MAX_PAGINATION_PAGES = 50
+PAGINATION_QUERY_KEYS = {
+    "from",
+    "start",
+    "offset",
+    "page",
+    "p",
+    "pageNumber",
+    "pageNo",
+    "currentPage",
+}
+PAGINATION_TEXT_EXACT = {"next", "prev", "previous"}
 
 
 class GenericAdapter(AdapterBase):
@@ -37,7 +57,7 @@ class GenericAdapter(AdapterBase):
             return [JobListing(url=career_url, title_preview=title_from_job_page(html, career_url))]
         await _exhaust_load_more(page, career_url)
         html = await page.content()
-        listings = discover_job_links(html, career_url)
+        listings = await _discover_paginated_job_links(page, career_url, html)
         if listings:
             return listings
         try:
@@ -45,7 +65,7 @@ class GenericAdapter(AdapterBase):
         except Exception:
             await page.wait_for_timeout(1000)
         await _exhaust_load_more(page, career_url)
-        return discover_job_links(await page.content(), career_url)
+        return await _discover_paginated_job_links(page, career_url, await page.content())
 
     async def extract_description(self, page, job_url: str) -> str:
         await goto_with_pacing(page, job_url, timeout=30000)
@@ -83,6 +103,158 @@ def _finalize_description(description: str, *, job_url: str, adapter: str) -> st
         log.error("job_description_too_short", adapter=adapter, job_url=job_url, characters=len(text))
         raise RuntimeError(f"Extracted job description is too short ({len(text)} chars) for {job_url}")
     return text
+
+
+async def _discover_paginated_job_links(page, career_url: str, initial_html: str) -> list[JobListing]:
+    listings_by_url: dict[str, JobListing] = {}
+    visited = {_normalize_page_url(getattr(page, "url", None) or career_url)}
+    pending = _pagination_links(
+        initial_html,
+        getattr(page, "url", None) or career_url,
+        career_url,
+        visited=visited,
+    )
+
+    _merge_listings(listings_by_url, discover_job_links(initial_html, career_url))
+
+    while pending and len(visited) < MAX_PAGINATION_PAGES:
+        next_url = pending.pop(0)
+        normalized = _normalize_page_url(next_url)
+        if normalized in visited:
+            continue
+        visited.add(normalized)
+        try:
+            await goto_with_pacing(page, next_url, timeout=30000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=4000)
+            except Exception:
+                await page.wait_for_timeout(750)
+            await _exhaust_load_more(page, next_url)
+            html = await page.content()
+        except Exception as exc:
+            log.debug("pagination_page_fetch_failed", url=next_url, error=str(exc))
+            continue
+
+        before = len(listings_by_url)
+        _merge_listings(listings_by_url, discover_job_links(html, next_url))
+        discovered = len(listings_by_url) - before
+        log.debug("pagination_page_scraped", url=next_url, discovered=discovered, total=len(listings_by_url))
+
+        known_pages = visited | {_normalize_page_url(url) for url in pending}
+        pending.extend(
+            _pagination_links(
+                html,
+                getattr(page, "url", None) or next_url,
+                career_url,
+                visited=known_pages,
+            )
+        )
+
+    return list(listings_by_url.values())
+
+
+def _merge_listings(target: dict[str, JobListing], listings: list[JobListing]) -> None:
+    for listing in listings:
+        target.setdefault(listing.url, listing)
+
+
+def _pagination_links(
+    html: str,
+    current_url: str,
+    career_url: str,
+    *,
+    visited: set[str] | None = None,
+) -> list[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    current = urlparse(current_url or career_url)
+    career = urlparse(career_url)
+    seen = set(visited or set())
+    out: list[str] = []
+
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        target_url = urljoin(current_url or career_url, href)
+        target = urlparse(target_url)
+        if not _same_listing_page(target, current, career):
+            continue
+        if looks_like_direct_job_url(target_url):
+            continue
+        if not _looks_like_pagination_anchor(anchor, target):
+            continue
+        normalized = _normalize_page_url(target_url)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(_strip_fragment(target_url))
+
+    return [url for _, url in sorted(enumerate(out), key=lambda item: (_pagination_sort_key(item[1]), item[0]))]
+
+
+def _same_listing_page(target, current, career) -> bool:
+    expected_host = (career.netloc or current.netloc).lower()
+    target_host = target.netloc.lower()
+    if target_host and expected_host and target_host != expected_host:
+        return False
+    current_path = (current.path or career.path or "/").rstrip("/") or "/"
+    target_path = (target.path or "/").rstrip("/") or "/"
+    return target_path == current_path
+
+
+def _looks_like_pagination_anchor(anchor, target) -> bool:
+    text = _compact(anchor.get_text(" "))
+    aria = _compact(str(anchor.get("aria-label") or ""))
+    classes = _compact(" ".join(anchor.get("class") or []))
+    if "disabled" in classes or "active" in classes or "selected" in classes:
+        return False
+    query = parse_qs(target.query)
+    has_page_query = any(key in query for key in PAGINATION_QUERY_KEYS)
+    has_page_text = (
+        text.isdigit()
+        or text in PAGINATION_TEXT_EXACT
+        or aria.startswith("page ")
+        or aria in PAGINATION_TEXT_EXACT
+    )
+    has_page_class = "pagination" in classes or "next previous" in classes or "next-previous" in classes
+    return has_page_query and (has_page_text or has_page_class)
+
+
+def _pagination_sort_key(url: str) -> int:
+    query = parse_qs(urlparse(url).query)
+    for key in ("from", "start", "offset"):
+        value = _first_int(query.get(key))
+        if value is not None:
+            return value
+    for key in ("page", "p", "pageNumber", "pageNo", "currentPage"):
+        value = _first_int(query.get(key))
+        if value is not None:
+            return value * 1000
+    return 10**9
+
+
+def _first_int(values: list[str] | None) -> int | None:
+    if not values:
+        return None
+    try:
+        return int(values[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_page_url(url: str) -> str:
+    parsed = urlparse(_strip_fragment(url))
+    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
+    return urlunparse((parsed.scheme, parsed.netloc.lower(), parsed.path.rstrip("/") or "/", "", query, ""))
+
+
+def _strip_fragment(url: str) -> str:
+    parsed = urlparse(url)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, ""))
+
+
+def _compact(text: str) -> str:
+    return " ".join(text.lower().split())
 
 
 async def _exhaust_load_more(page, career_url: str) -> None:

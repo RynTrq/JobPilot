@@ -24,6 +24,7 @@ JOB_QUERY_KEYS = ("gh_jid", "jobid", "job_id", "job", "reqid", "req_id")
 ROLE_WORDS = (
     "engineer",
     "developer",
+    "artist",
     "software",
     "frontend",
     "front-end",
@@ -46,16 +47,24 @@ ROLE_WORDS = (
     "specialist",
     "supervisor",
     "copywriter",
+    "director",
+    "agent",
+    "writer",
+    "rigger",
+    "president",
     "partner",
 )
 ROLE_TITLE_NOUNS = frozenset(
     {
+        "agent",
         "analyst",
         "architect",
+        "artist",
         "associate",
         "consultant",
         "designer",
         "developer",
+        "director",
         "engineer",
         "executive",
         "frontend",
@@ -65,10 +74,13 @@ ROLE_TITLE_NOUNS = frozenset(
         "lead",
         "manager",
         "partner",
+        "president",
         "researcher",
+        "rigger",
         "scientist",
         "specialist",
         "supervisor",
+        "writer",
     }
 )
 NAV_TEXT_EXACT = {
