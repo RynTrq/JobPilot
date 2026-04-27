@@ -4,6 +4,71 @@ JobPilot is a local job-application assistant for macOS. It runs a Python FastAP
 
 JobPilot is designed to keep the human in control. Dry Run is the default mode. Real Submit must be enabled explicitly, and final review is enabled by default unless you opt into automatic final submission.
 
+## Fresh Clone Setup
+
+If you are starting from a brand-new Mac, install these pieces before running JobPilot end to end:
+
+| Install | Why it is needed | Where to get it |
+| --- | --- | --- |
+| Xcode | Builds and runs the Swift menu-bar app, and provides the AppKit bridge used by backend alerts. | Mac App Store |
+| Xcode Command Line Tools | Gives you the compiler and SDK pieces Xcode expects. | `xcode-select --install` |
+| `uv` | Creates the Python environment and installs the Python dependencies. | Astral's installer script |
+| Python 3.11 | Required by the backend runtime and locked by `pyproject.toml`. | `uv python install 3.11` |
+| Playwright Chromium | Browser automation target for the app run. | `playwright install chromium` |
+| LaTeX distribution | Compiles the generated resume and cover-letter PDFs. | MacTeX or BasicTeX |
+| MongoDB, optional | Stores the optional mirrored application ledger. | MongoDB Atlas or a local MongoDB server |
+| Cloud LLM keys, optional | Enable cloud fallback routing when local generation is not enough. | Environment variables |
+
+Then install the toolchain and project dependencies:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv python install 3.11
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install -e ".[dev]"
+playwright install chromium
+```
+
+If you want PDF generation, install MacTeX or BasicTeX before the first resume or cover-letter run. If you want cloud fallback routing, set the provider API keys in `.env` or your shell environment. If you want the Mongo mirror, set `MONGO_URI` before starting the backend.
+
+First-run notes:
+
+- `sentence-transformers` downloads `BAAI/bge-small-en-v1.5` the first time the encoder runs.
+- `mlx-lm` downloads the local generation model only if you disable `GENERATOR_DISABLED`.
+- Playwright will download Chromium the first time you run the install command above.
+- The backend will create `data/jobpilot.db`, `data/logs/`, and `data/outputs/` automatically.
+
+## Tech Stack
+
+### Runtime Layers
+
+| Layer | Where in repo | What it is | How JobPilot uses it |
+| --- | --- | --- | --- |
+| Backend API and orchestration | `backend/main.py`, `backend/conductor.py`, `backend/api/*`, `backend/config.py` | `FastAPI`, `Uvicorn`, `Pydantic`, `python-dotenv`, `structlog` | Boots the runtime, loads config and stores, wires the browser, encoder, classifier, router, generator, and human-intervention gates, then exposes the REST and stream endpoints. |
+| Browser automation | `backend/scraping/browser.py`, `backend/scraping/adapters/*`, `backend/form/*` | `Playwright`, `playwright-stealth` | Opens Chromium, navigates ATS pages, finds forms, types answers, clicks next and submit buttons, and handles CAPTCHA, login, and validation blockers. |
+| Parsing, retries, and matching | `backend/scraping/job_page.py`, `backend/form/filler.py`, `backend/form/navigator.py` | `BeautifulSoup4`, `Trafilatura`, `RapidFuzz`, `Tenacity` | Pulls readable job text from noisy pages, normalizes it, fuzzy-matches labels and buttons, and retries transient actions instead of failing too early. |
+| Embeddings and fit scoring | `backend/models/encoder.py`, `backend/models/classifier.py`, `backend/models/classifier_feedback.py` | `sentence-transformers`, `scikit-learn`, `numpy` | Turns job descriptions and profile facts into vectors, scores job fit, and nudges scores using stored pass/fail feedback. |
+| Form answering and learned memory | `backend/form/field_answerer.py`, `backend/storage/ground_truth.py`, `backend/storage/learned_answers.py`, `backend/storage/button_memory.py`, `backend/specialists/translator.py` | Ground-truth JSON/YAML, SQLite, translation cache | Answers structured fields from verified profile data, reuses learned answers, caches translations, and remembers button names so repeat runs get steadier. |
+| Routing and generation | `backend/llm/router.py`, `backend/llm/providers.py`, `backend/models/generator.py`, `backend/specialists/*` | MLX local models and OpenAI-compatible cloud clients | Chooses local or cloud generation based on privacy, latency, schema needs, and provider availability, then produces resume text, field answers, extraction JSON, and translations. |
+| Resume and cover-letter generation | `backend/resume/*`, `templates/*` | `Jinja2`, LaTeX toolchain | Picks the most relevant projects and bullets, builds a job-specific resume context, renders LaTeX, and compiles PDFs. |
+| Storage and persistence | `backend/storage/sqlite_db.py`, `backend/storage/mongo_db.py`, `data/*` | SQLite, `pymongo`, JSON, YAML | Stores runs, applications, per-mode history, pending actions, learned answers, site limits, translation cache, feedback, and optional Mongo mirrors; keeps the user profile and library files under `data/`. |
+| Alerts and manual takeover | `backend/alarm/*` | `pyobjc` with `AppKit` | Emits native macOS attention signals when the backend needs a human to take over for CAPTCHA, approval, login, or validation issues. |
+| macOS menu-bar app | `menubar-app/JobPilot/*` | `Swift`, `SwiftUI`, `AppKit`, `Combine` | Provides the native status-bar UI, history views, approval prompts, browser controls, and the `BackendClient` bridge to the Python backend. |
+| Tooling and tests | `pyproject.toml`, `uv.lock`, `tests/*` | `pytest`, `pytest-asyncio`, `httpx`, `hypothesis`, `TexSoup` | Pins dependencies and validates API behavior, run-state transitions, document generation, and browser-driven edge cases. |
+
+### Models
+
+| Model or artifact | Where it is used | What it is for | How it is used |
+| --- | --- | --- | --- |
+| `BAAI/bge-small-en-v1.5` | `backend/models/encoder.py`, `backend/models/classifier.py`, `backend/form/field_answerer.py`, `backend/resume/bullet_picker.py` | Semantic embeddings | Encodes job descriptions, profile facts, field labels, and project text into 384-dimensional vectors for matching and ranking. If the model is unavailable, JobPilot falls back to a deterministic hashing encoder. |
+| `data/classifier.pkl` | `backend/models/classifier.py` | Trained fit classifier | If present, JobPilot loads the pickled classifier and uses it with embeddings to score fit. If it is missing, the code switches to heuristic scoring and still applies feedback-based adjustment from `classifier_feedback.jsonl`. |
+| `mlx-community/Qwen2.5-14B-Instruct-4bit` | `backend/models/generator.py` | Local text generator | MLX loads this model only when `GENERATOR_DISABLED=0`. The default configuration keeps local generation off, so fresh clones do not need the model unless you explicitly enable it. |
+| `mlx-community/Qwen2.5-1.5B-Instruct-4bit`, `mlx-community/Qwen2.5-3B-Instruct-4bit`, `mlx-community/Qwen2.5-7B-Instruct-4bit` | `backend/llm/router.py` | Local routing targets | The router chooses the small model for short completions, the JSON-friendly model for structured output, and the larger reasoning model for more demanding prompts while keeping sensitive work local. |
+| `llama-3.1-8b-instant`, `llama-3.3-70b-versatile`, `gemini-2.5-flash` | `backend/llm/router.py`, `backend/llm/providers.py` | Cloud routing targets | If cloud keys are configured, the router can send work to Groq or Gemini models for low-latency or higher-quality fallback paths. |
+
+Cloud provider adapters live in `backend/llm/providers.py` and are only created for keys present in the environment. Supported backends are Groq, Gemini, Cerebras, Mistral, and OpenRouter.
+
 ## What It Does
 
 - Lists jobs from supported career pages and ATS platforms.
@@ -28,32 +93,19 @@ History is mode-specific. A green Dry Run entry cannot be dry-run again. A green
 ## Project Layout
 
 ```text
-backend/                    FastAPI server, orchestration, storage, scraping, form filling
+backend/                    FastAPI backend and orchestration
 backend/api/                REST and stream routes
-backend/form/               Form filling, validation, CAPTCHA/manual takeover guards
-backend/scraping/adapters/  ATS and browser-form adapters
-backend/storage/            SQLite, MongoDB, learned answers, profile stores
+backend/alarm/              Native macOS alert and takeover bridge
+backend/form/               Form filling, validation, CAPTCHA/manual takeover logic
+backend/llm/                Model routing and cloud client adapters
+backend/models/             Embeddings, classifier, generator, and feedback logic
+backend/resume/             Resume and cover-letter context builder
+backend/scraping/           Browser driver, page extraction, adapters, and dedup helpers
+backend/specialists/        JD extraction, translation, grounded free-text helpers
+backend/storage/            SQLite, MongoDB, profile stores, learned answers
 menubar-app/JobPilot/       Swift menu-bar application
 templates/                  LaTeX resume and cover-letter templates
-data/                       Local database, browser profile, profile inputs, logs, generated outputs
-```
-
-## Requirements
-
-- macOS
-- Python 3.11
-- `uv`
-- Chromium installed through Playwright
-- Xcode, if you want to build/run the menu-bar app
-- A LaTeX distribution such as MacTeX or BasicTeX if you want PDF compilation
-
-Install the Python environment:
-
-```bash
-uv venv
-source .venv/bin/activate
-uv pip install -e ".[dev]"
-playwright install chromium
+data/                       Local database, browser profile, profile inputs, logs, outputs
 ```
 
 ## Configuration
@@ -82,6 +134,13 @@ MONGO_DB=jobpilot
 GENERATOR_DISABLED=1
 CLASSIFIER_THRESHOLD=0.65
 CLASSIFIER_AUTO_PASS=0
+
+# Optional cloud providers
+GROQ_API_KEY=
+GEMINI_API_KEY=
+CEREBRAS_API_KEY=
+MISTRAL_API_KEY=
+OPENROUTER_API_KEY=
 ```
 
 Notes:
@@ -91,6 +150,8 @@ Notes:
 - `AUTO_SUBMIT_WITHOUT_APPROVAL=0` means final approval is required.
 - `LIVE_MODE=1` shows/focuses the browser for easier observation. Warnings, missing fields, login, CAPTCHA, and errors still pause for user action.
 - `GENERATOR_DISABLED=1` keeps LLM generation disabled unless you configure providers.
+- `JOBPILOT_PORT` is the backend listen port.
+- `JOBPILOT_BACKEND_PORT` is the port the menu-bar app uses when connecting to the backend.
 
 ## Profile Data
 
@@ -104,13 +165,13 @@ data/bullet_library.json
 data/defaults.json
 ```
 
-`candidate_profile.yaml` is the policy-rich profile. It controls identity, work authorization, preferences, disclosure defaults, compensation rules, sensitive identifier policy, and automation guardrails. Save it exactly here:
+`candidate_profile.yaml` is the policy-rich profile. It controls identity, work authorization, preferences, disclosure defaults, compensation rules, sensitive identifier policy, and automation guardrails. The backend reads it as a plain mapping, so extra policy sections are fine as long as you keep the structure consistent. Save it exactly here:
 
 ```text
 data/My_Ground-info/profile/candidate_profile.yaml
 ```
 
-Use this shape:
+Use this shape. All top-level keys are required, even if some arrays are empty:
 
 ```yaml
 schema_version: 1
@@ -260,7 +321,7 @@ Use this shape:
     "email": "you@example.com",
     "phone_e164": "+15551234567",
     "location_city": "Your City",
-    "location_state": "Your State",
+    "location_state": null,
     "location_country": "Your Country",
     "citizenship": "Your Citizenship",
     "work_auth_us": "I am authorized to work in the US",
@@ -270,21 +331,7 @@ Use this shape:
     "portfolio_url": "https://your-site.example",
     "pronouns": "Prefer not to say"
   },
-  "education": [
-    {
-      "institution": "University Name",
-      "degree": "Bachelor of Science",
-      "field": "Computer Science",
-      "start_month_year": "2022-09",
-      "end_month_year": "2026-05",
-      "gpa": "3.8/4.0",
-      "honors": [],
-      "relevant_courses": [
-        "Data Structures and Algorithms",
-        "Operating Systems"
-      ]
-    }
-  ],
+  "education": [],
   "experience": [
     {
       "id": "exp_company_role_2025",
@@ -308,16 +355,37 @@ Use this shape:
       "domains": ["backend", "frontend"]
     }
   ],
-  "preferences": {
-    "earliest_start_date": "2026-06-01",
-    "notice_period_days": 14,
-    "target_roles": ["Software Engineer", "Backend Engineer"],
-    "minimum_salary": {
-      "currency": "USD",
-      "amount": 100000
-    }
+  "skills": {
+    "languages": ["Python"],
+    "frameworks": ["FastAPI"],
+    "tools": ["Git"],
+    "ml": [],
+    "soft": ["Communication"]
   },
-  "profile_statement": "One short professional summary grounded only in verified facts."
+  "preferences": {
+    "desired_roles": ["Software Engineer", "Backend Engineer"],
+    "desired_industries": ["SaaS", "Developer Tools"],
+    "salary_min_usd_annual": 100000,
+    "salary_expected_inr_lpa": null,
+    "notice_period_days": 14,
+    "willing_to_relocate": true,
+    "earliest_start_date": "2026-06-01"
+  },
+  "eeoc": {
+    "gender": "Prefer not to say",
+    "race": "Prefer not to say",
+    "veteran": "Prefer not to say",
+    "disability": "Prefer not to say",
+    "hispanic_latino": "Prefer not to say"
+  },
+  "freeform_answers": {
+    "why_this_role": "One grounded sentence.",
+    "greatest_strength": "One grounded sentence.",
+    "greatest_weakness": "One grounded sentence.",
+    "five_year_goals": "One grounded sentence."
+  },
+  "profile_statement": "One short professional summary grounded only in verified facts.",
+  "custom": {}
 }
 ```
 

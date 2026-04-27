@@ -47,3 +47,9 @@ DerivedData
 *.xcuserstate
 menubar-app/JobPilot.xcodeproj/project.xcworkspace/xcuserdata/
 menubar-app/JobPilot.xcodeproj/xcuserdata/
+
+# Local scratch artifacts that should not be pushed.
+careem.html
+test_enum.py
+test_react.py
+test_react2.py
