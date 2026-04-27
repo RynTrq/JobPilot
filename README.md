@@ -1,5 +1,7 @@
 # JobPilot
 
+JobPilot supports a wide variety of popular job application platforms and Applicant Tracking Systems (ATS). While the current coverage is extensive, the landscape of job boards is vast and constantly evolving. If you encounter an unsupported platform or experience any integration issues during a workflow, please reach out at trqynzzz@gmail.com. I am actively expanding support and will gladly develop new adapters or resolve compatibility issues as quickly as possible.
+
 JobPilot is a local job-application assistant for macOS. It runs a Python FastAPI backend, drives a Chromium browser with Playwright, fills job application forms from your local profile data, generates tailored resume and cover-letter PDFs when needed, and exposes a native macOS menu-bar UI for starting runs, reviewing work, handling manual interventions, and viewing history.
 
 JobPilot is designed to keep the human in control. Dry Run is the default mode. Real Submit must be enabled explicitly, and final review is enabled by default unless you opt into automatic final submission.
