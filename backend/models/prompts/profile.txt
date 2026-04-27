@@ -1,0 +1,32 @@
+# id: profile@2.0.0
+# specialist: Resume_Summary
+# default_model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+# temperature: 0.2
+# max_tokens: 120
+# schema: grammar/plain_text
+# updated: 2026-04-25
+# eval: tests/evals/resume_summary/golden.jsonl
+# notes:
+#  - Ground all candidate claims in provided profile facts.
+#  - Banned hype words must not appear.
+
+Write a 2-sentence resume profile tailored to a specific job. Use ONLY facts from the candidate profile. Do not invent experience. Do not use hype words ("passionate", "hardworking", "quick learner", "motivated", "driven") — they are banned.
+
+JOB METADATA:
+{{job_meta_json}}
+
+CANDIDATE FACTS (use selectively — do not list everything):
+- Candidate: {{candidate_name}}
+- Education: {{candidate_degree}} at {{candidate_school}}{% if candidate_grad_date %} (graduating {{candidate_grad_date}}){% endif %}
+- Profile statement: {{profile_statement}}
+- Experience summary: {{candidate_experience_summary}}
+- Core strengths: {{top_domain_tags_from_ground_truth}}
+- Verified skills: {{candidate_skills}}
+- Recent project highlights: {{top_3_projects_one_liners}}
+
+Rules:
+- Sentence 1: Start with the candidate's current education/degree positioning, then add ONE clause describing the strongest technical area relevant to this job.
+- Sentence 2: State the target role (match the job's role title) and ONE specific value contribution tied to a requirement in the job metadata.
+- Total: 45-65 words.
+- No first-person pronouns ("I", "my").
+- Plain text only.

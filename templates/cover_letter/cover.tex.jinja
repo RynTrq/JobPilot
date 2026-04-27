@@ -1,0 +1,51 @@
+% ============================================================
+%  Cover Letter Template (Jinja2 slots)
+%  Rendered ONLY when the application form requests a cover letter
+%  (detection logic in backend/cover_letter/detector.py)
+% ============================================================
+\documentclass[11pt,a4paper]{letter}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{lmodern}
+\IfFileExists{microtype.sty}{\usepackage{microtype}}{}
+
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+\pagenumbering{gobble}
+
+% ---------- SIGNATURE / SENDER ----------
+\signature{ {{ sender.full_name }} }
+\address{ %
+  {{ sender.full_name }} \\
+  {{ sender.location_line }} \\
+  \href{mailto:{{ sender.email }}}{ {{ sender.email }} } \\
+  {{ sender.phone }} \\
+  \href{ {{ sender.portfolio_url }} }{ {{ sender.portfolio_url | replace("https://", "") | replace("http://", "") }} }
+}
+
+\begin{document}
+
+% ---------- RECIPIENT (company name from extracted metadata) ----------
+\begin{letter}{ %
+  {{ company_name }} \\
+  Hiring Team
+}
+
+% ---------- DATE (auto) ----------
+\date{\today}
+
+\opening{Dear Hiring Team,}
+
+% ---------- HOOK (GENERATED — LLM call 1) ----------
+{{ paragraph_hook }}
+
+% ---------- FIT + CLOSE (GENERATED — LLM call 2, single prompt returns both) ----------
+{{ paragraph_fit_close }}
+
+\closing{Sincerely,}
+
+\end{letter}
+\end{document}

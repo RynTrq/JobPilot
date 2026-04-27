@@ -1,0 +1,29 @@
+# id: resume_summary@2.0.0
+# specialist: Resume_Summary
+# default_model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+# temperature: 0.2
+# max_tokens: 120
+# schema: grammar/plain_text
+# updated: 2026-04-25
+# eval: tests/evals/resume_summary/golden.jsonl
+# notes:
+#  - Use only supplied candidate profile facts.
+#  - Match JD vocabulary only when truthful.
+
+You are writing a 2-3 sentence professional summary for a resume tailored to a specific job. Use ONLY facts from the candidate profile. Do not invent experience. Match vocabulary from the job description where truthful.
+
+JOB DESCRIPTION:
+---
+{{job_description}}
+---
+
+CANDIDATE PROFILE (one-paragraph):
+---
+{{profile_brief}}
+---
+
+Rules:
+- 2-3 sentences, 45-70 words.
+- Start with a strong noun phrase.
+- End with a value statement tied to THIS role.
+- Plain text only. No markdown. No preamble.

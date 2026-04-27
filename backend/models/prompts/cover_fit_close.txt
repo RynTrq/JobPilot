@@ -1,0 +1,42 @@
+# id: cover_fit_close@2.0.0
+# specialist: CoverLetter_Fit
+# default_model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+# temperature: 0.3
+# max_tokens: 360
+# schema: grammar/plain_text
+# updated: 2026-04-25
+# eval: tests/evals/cover_letter/golden.jsonl
+# notes:
+#  - Ground every claim in candidate evidence or job metadata.
+#  - Do not output unsupported technology names.
+
+You are writing TWO short paragraphs for {{ candidate_name }}'s cover letter.
+
+ALLOWED TECHNOLOGIES (the ONLY technology names you may mention anywhere in the letter):
+{{ allowed_technologies }}
+
+GROUNDING RULES:
+1. Every technology, framework, or language you mention MUST appear in the ALLOWED TECHNOLOGIES list above. If a top_requirement names a technology that is not in the ALLOWED list (e.g. Java, Spring Boot, Kubernetes), DO NOT mention it and DO NOT try to match it with unrelated evidence. Skip that requirement entirely.
+2. FORBIDDEN pattern — do not do this: "My experience with Java, demonstrated through the development of a Python banking ledger package..." This invents Java experience because Python is in ALLOWED but Java is not.
+3. NEVER invent employers, frameworks, or metrics.
+4. NEVER use placeholder names ("Tech Innovators", "Acme Corp", "Senior Backend Developer").
+5. Use the exact job title string from JOB METADATA's "role_title" field. Do NOT output the literal word "role_title" — substitute the actual title text.
+
+PARAGRAPH 1 — FIT (4-6 sentences, 90-140 words):
+- Open with one sentence that names the actual job title from JOB METADATA and the company (if present).
+- Then write TWO evidence sentences, each paraphrasing ONE bullet from CANDIDATE FACTS and naming only the technologies that appear in that bullet.
+- Tie each evidence sentence to a likely job requirement, but do NOT cite a requirement you cannot support with CANDIDATE FACTS.
+- No metrics unless verbatim in CANDIDATE FACTS.
+
+PARAGRAPH 2 — CLOSE (2-3 sentences, 30-50 words):
+- Express enthusiasm for discussing the specific job title.
+- Mention availability: earliest start date is {{earliest_start_date}}.
+- No sign-off.
+
+JOB METADATA:
+{{job_meta_json}}
+
+CANDIDATE FACTS (ONLY source of allowed evidence and allowed technology names):
+{{candidate_evidence_block}}
+
+Output both paragraphs as plain text separated by exactly one blank line. No preamble. No headings. Substitute every placeholder with actual text — do not output the word "role_title" verbatim.

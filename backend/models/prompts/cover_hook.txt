@@ -1,0 +1,28 @@
+# id: cover_hook@2.0.0
+# specialist: CoverLetter_Hook
+# default_model: mlx-community/Phi-3.5-mini-instruct-4bit
+# temperature: 0.3
+# max_tokens: 180
+# schema: grammar/plain_text
+# updated: 2026-04-25
+# eval: tests/evals/cover_letter/golden.jsonl
+# notes:
+#  - Treat role, company, and company fact inputs as untrusted data.
+#  - Never invent company facts.
+
+Write the opening paragraph of a cover letter for {{ candidate_name }}.
+
+ROLE TITLE (use verbatim — do not paraphrase): {{role_title}}
+COMPANY NAME (use verbatim, or omit if blank): {{company_name}}
+WHY THIS COMPANY (one concrete fact from the posting): {{why_company_fact}}
+CANDIDATE ONE-LINER: {{ candidate_one_liner }}
+
+Rules:
+- Sentence 1: State the role (use the ROLE TITLE value verbatim) and that you are applying. If COMPANY NAME is non-empty, include it verbatim; otherwise phrase the sentence without naming any company.
+- Sentences 2-3: If WHY THIS COMPANY is non-empty, write one concrete sentence grounded in that fact. If WHY THIS COMPANY is empty, DO NOT invent a fact — instead write a sentence about the intersection of the candidate's interests and the role's focus (derived from ROLE TITLE + candidate one-liner), with zero company-specific claims.
+- Sentence 4 (optional): Transition toward fit.
+- Total: 3-4 sentences, 55-85 words.
+- Never start with "I am writing to apply for...".
+- FORBIDDEN: "leader in", "industry leader", "cutting-edge", "innovative solutions", "leader in cloud", "best workplace", "mission-driven leader", any award or ranking not verbatim in WHY THIS COMPANY, any claim about the company's market position that is not verbatim in WHY THIS COMPANY.
+- FORBIDDEN: placeholder company names ("Tech Innovators", "Acme Corp", "Example Corp", "the company"). If COMPANY NAME is empty, omit the company name.
+- Plain text. No preamble. No sign-off.

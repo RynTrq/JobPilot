@@ -1,0 +1,13 @@
+# id: cover_letter_close@2.0.0
+# specialist: CoverLetter_Close
+# default_model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+# temperature: 0.3
+# max_tokens: 80
+# schema: grammar/plain_text
+# updated: 2026-04-25
+# eval: tests/evals/cover_letter/golden.jsonl
+# notes:
+#  - Keep the close grounded and short.
+#  - Do not include sign-off text.
+
+Write the closing paragraph of a cover letter. 2-3 sentences, 30-50 words. Do not include the sign-off.

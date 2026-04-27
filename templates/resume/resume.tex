@@ -1,0 +1,65 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=0.6in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{lmodern}
+\pagenumbering{gobble}
+\setlength{\parindent}{0pt}
+\setlist[itemize]{leftmargin=0.18in,itemsep=2pt,topsep=2pt}
+\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
+
+\begin{document}
+
+\begin{center}
+{\Huge \textbf{ {{ personal.full_name }} }}\\
+\vspace{2pt}
+{{ personal.email }} \textbar{} {{ personal.phone_e164 }} \textbar{}
+\href{ {{ personal.linkedin_url }} }{LinkedIn} \textbar{}
+\href{ {{ personal.github_url }} }{GitHub}
+{% if personal.portfolio_url %}\textbar{} \href{ {{ personal.portfolio_url }} }{Portfolio}{% endif %}
+\end{center}
+
+\section{Summary}
+{{ tailored_summary }}
+
+\section{Education}
+{% for edu in education %}
+\textbf{ {{ edu.degree }} in {{ edu.field }} } \hfill {{ edu.start_month_year }} -- {{ edu.end_month_year }}\\
+\textit{ {{ edu.institution }} }{% if edu.gpa %} \hfill {{ edu.gpa }}{% endif %}
+{% if edu.relevant_courses %}
+\begin{itemize}
+\item Relevant coursework: {{ edu.relevant_courses | join(", ") }}
+\end{itemize}
+{% endif %}
+{% endfor %}
+
+\section{Experience}
+{% for exp in experience_selected %}
+\textbf{ {{ exp.title }} } \hfill {{ exp.start_month_year }} -- {{ exp.end_month_year }}\\
+\textit{ {{ exp.company }} }{% if exp.location %} \hfill {{ exp.location }}{% endif %}
+\begin{itemize}
+{% for bullet in exp.bullets %}
+\item {{ bullet }}
+{% endfor %}
+\end{itemize}
+{% endfor %}
+
+\section{Projects}
+{% for project in projects_selected %}
+\textbf{ {{ project.title }} }{% if project.url %} \hfill \href{ {{ project.url }} }{Link}{% endif %}\\
+\textit{ {{ project.tech_stack | join(", ") }} }
+\begin{itemize}
+{% for bullet in project.bullets %}
+\item {{ bullet }}
+{% endfor %}
+\end{itemize}
+{% endfor %}
+
+\section{Technical Skills}
+\textbf{Languages:} {{ skills_selected.languages | join(", ") }}\\
+\textbf{Frameworks:} {{ skills_selected.frameworks | join(", ") }}\\
+\textbf{Tools:} {{ skills_selected.tools | join(", ") }}
+
+\end{document}

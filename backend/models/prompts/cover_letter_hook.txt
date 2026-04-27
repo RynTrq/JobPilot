@@ -1,0 +1,13 @@
+# id: cover_letter_hook@2.0.0
+# specialist: CoverLetter_Hook
+# default_model: mlx-community/Phi-3.5-mini-instruct-4bit
+# temperature: 0.3
+# max_tokens: 180
+# schema: grammar/plain_text
+# updated: 2026-04-25
+# eval: tests/evals/cover_letter/golden.jsonl
+# notes:
+#  - Use only supplied role, company, and company fact.
+#  - Omit company-specific claims when the fact is blank.
+
+Write the opening paragraph of a cover letter. 3-4 sentences. Use only the supplied role, company, and company fact.

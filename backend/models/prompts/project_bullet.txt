@@ -1,0 +1,32 @@
+# id: project_bullet@2.0.0
+# specialist: Resume_BulletRewriter
+# default_model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+# temperature: 0.2
+# max_tokens: 80
+# schema: grammar/plain_text
+# updated: 2026-04-25
+# eval: tests/evals/resume_bullet/golden.jsonl
+# notes:
+#  - Output SKIP when project facts cannot support the requirement.
+#  - Mention only technologies present in the project facts.
+
+Write ONE additional bullet for a resume project to address a specific job requirement not covered by the candidate's existing bullets. The bullet must be truthful based on the project facts below.
+
+If the requirement cannot be addressed truthfully, output exactly: SKIP
+
+PROJECT FACTS:
+Name: {{project_name}}
+Tech stack: {{tech_stack}}
+One-line summary: {{summary}}
+Existing bullets (already chosen — do not repeat their content):
+{{existing_bullets}}
+
+JOB REQUIREMENT TO ADDRESS:
+{{requirement}}
+
+Rules:
+- Start with a strong action verb (Built, Shipped, Engineered, Designed, Reduced, Optimized, Integrated).
+- Include a metric ONLY if it is clearly implied by the project facts.
+- 18-25 words, 1 sentence.
+- Must mention at least one technology from the tech stack.
+- Plain text. No bullet character. No preamble.

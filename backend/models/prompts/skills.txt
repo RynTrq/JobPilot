@@ -1,0 +1,46 @@
+# id: skills@2.0.0
+# specialist: Resume_Skills
+# default_model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+# temperature: 0.0
+# max_tokens: 400
+# schema: object{languages:string[],frameworks:string[],tools:string[],databases:string[],concepts:string[],coursework:string[]}
+# updated: 2026-04-25
+# eval: tests/evals/resume_skills/golden.jsonl
+# notes:
+#  - Choose only from the deterministic pools in this prompt.
+#  - Output JSON only.
+
+Select and order technical skills for a resume targeting this job. Output valid minified JSON with EXACTLY these keys: {"languages": [...], "frameworks": [...], "tools": [...], "databases": [...], "concepts": [...], "coursework": [...]}
+
+Rules for each key:
+
+LANGUAGES:
+- MUST start with these in some order: Python, C/C++, Java, JavaScript/TypeScript
+- If the job description names another language from this list, append it: Go, Rust, Ruby, Kotlin, Swift, Scala, R, PHP
+- Reorder so the job's primary language is first.
+
+FRAMEWORKS (pick 5-8 from this pool only):
+React, Next.js, Express.js, Node.js, FastAPI, Flask, Django, TailwindCSS, PyTorch, TensorFlow, scikit-learn, Transformers (HuggingFace), LangChain, NumPy, Pandas, OpenCV, Redux, Zustand, SWR, Axios, Jest, Pytest
+- Order by JD relevance (most relevant first).
+
+TOOLS (pick 5-8 from this pool only):
+Git, GitHub Actions, Docker, Kubernetes, AWS, GCP, Vercel, Netlify, Render, Linux, VS Code, Postman, Figma, Jira, Notion, Jupyter, Weights & Biases, MLflow, Kafka, Redis, RabbitMQ, Nginx, CloudFlare
+- Order by JD relevance.
+
+DATABASES:
+- MUST start with: PostgreSQL, MongoDB
+- If JD names another: MySQL, Redis, DynamoDB, Cassandra, Elasticsearch, Snowflake, BigQuery, Pinecone, Weaviate, SQLite, Neo4j — append it.
+- Reorder so JD's primary DB is first.
+
+CONCEPTS (pick 5-7 from this pool only):
+Data Structures & Algorithms, Object-Oriented Programming, System Design, REST API Design, GraphQL, Microservices, Event-Driven Architecture, Concurrency & Parallelism, Distributed Systems, CAP Theorem, Caching Strategies, CI/CD Pipelines, Test-Driven Development, Agile/Scrum, Machine Learning Fundamentals, Deep Learning, NLP, Computer Vision, Transformer Architectures, Retrieval-Augmented Generation (RAG), Vector Embeddings, Model Fine-Tuning, MLOps, Data Pipelines, ETL, Authentication & Authorization (OAuth/JWT), WebSockets, Server-Sent Events, Database Indexing, Query Optimization, Schema Design
+- Order by JD relevance (the ATS keyword targets go first).
+
+COURSEWORK (pick 3-5 from this pool only):
+Data Structures & Algorithms, Advanced Algorithms, Operating Systems, Computer Networks, Database Management Systems, Theory of Computation, Compilers, Computer Architecture, Machine Learning, Deep Learning, Natural Language Processing, Computer Vision, Artificial Intelligence, Information Retrieval, Statistical Methods in AI, Big Data Analytics, Distributed Systems, Cloud Computing, Software Engineering, Probability & Statistics, Linear Algebra, Discrete Mathematics, Optimization, Human-Computer Interaction, Computer Graphics, Computer Security, Cryptography, Reinforcement Learning, Advanced Data Structures, Program Analysis
+- Order by JD relevance.
+
+NEVER invent skills outside these pools. Do not output any explanation or prose. Output ONLY the JSON.
+
+JOB METADATA:
+{{job_meta_json}}

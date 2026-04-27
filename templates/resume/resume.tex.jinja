@@ -1,0 +1,174 @@
+% ============================================================
+%  Resume Template (Jinja2 slots)
+%  Rendered per job application by backend/resume/assembler.py
+% ============================================================
+\documentclass[11pt,a4paper]{article}
+
+% ---------- ATS SAFE ----------
+\IfFileExists{glyphtounicode.tex}{
+  \input{glyphtounicode}
+  \pdfgentounicode=1
+}{}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.60in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{lmodern}
+\IfFileExists{microtype.sty}{\usepackage{microtype}}{}
+
+% ---------- STYLE ----------
+\definecolor{sectionblue}{HTML}{1F4E79}
+\definecolor{textgray}{HTML}{333333}
+\color{textgray}
+\linespread{1.03}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+\pagenumbering{gobble}
+
+\setlist[itemize]{
+  leftmargin=14pt,
+  itemsep=1.5pt,
+  topsep=2pt,
+  label=\textendash
+}
+
+% ---------- SECTION TITLE ----------
+\newcommand{\sectionTitle}[1]{ %
+  \vspace{8pt}
+  {\color{sectionblue}\large\bfseries\MakeUppercase{#1}}\par
+  \vspace{2pt}
+  {\color{sectionblue}\hrule height 0.6pt}
+  \vspace{5pt}
+}
+
+% ---------- ENTRY (Experience / Education) ----------
+\newcommand{\role}[4]{ %
+  \textbf{#1} \hfill {\small #2}\\[-1pt]
+  {\small\textit{#3} \hfill \textit{#4}}\par
+  \vspace{1pt}
+}
+
+% ---------- PROJECT ----------
+\newcommand{\project}[3]{ %
+  \textbf{#1} \hfill {\small #2}\\[-1pt]
+  {\small\textit{#3}}\par
+  \vspace{1pt}
+}
+
+% ---------- PROJECT LINK HELPERS ----------
+\newcommand{\ghlink}[1]{ %
+  {\normalfont\small\color{sectionblue}%
+   [\href{#1}{GitHub}]}}
+\newcommand{\livelink}[1]{ %
+  {\normalfont\small\color{sectionblue}%
+   [\href{#1}{Live}]}}
+
+% ---------- SKILL ROW ----------
+\newcommand{\skillrow}[2]{ %
+  \textbf{#1:} #2\par\vspace{2pt}
+}
+
+% ============================================================
+\begin{document}
+% ============================================================
+
+% ---------- HEADER ----------
+\begin{center}
+  {\Huge\textbf{ {{ personal.full_name }} }}\\[3pt]
+  {\large {{ tagline }} }\\[5pt]
+  {% if personal.location_line %}{{ personal.location_line }} \textbar{}{% endif %}
+  {% if personal.phone %}{{ personal.phone }} \textbar{}{% endif %}
+  {% if personal.email %}\href{mailto:{{ personal.email }}}{ {{ personal.email }} } \textbar{}{% endif %}
+  {% if personal.portfolio_url %}\href{ {{ personal.portfolio_url }} }{ {{ personal.portfolio_url | replace("https://", "") | replace("http://", "") }} } \textbar{}{% endif %}
+  {% if personal.github_url %}\href{ {{ personal.github_url }} }{ {{ personal.github_url | replace("https://", "") | replace("http://", "") }} } \textbar{}{% endif %}
+  {% if personal.linkedin_url %}\href{ {{ personal.linkedin_url }} }{ {{ personal.linkedin_url | replace("https://", "") | replace("http://", "") }} }{% endif %}
+\end{center}
+
+% ---------- PROFILE (GENERATED — 2 sentences per JD) ----------
+\sectionTitle{Profile}
+{{ profile_paragraph }}
+
+% ---------- TECHNICAL SKILLS (MIXED — base + generated) ----------
+\sectionTitle{Technical Skills}
+\skillrow{Languages}{ {{ skills.languages | join(", ") }} }
+\skillrow{Frameworks \& Libraries}{ {{ skills.frameworks | join(", ") }} }
+\skillrow{Tools \& Platforms}{ {{ skills.tools | join(", ") }} }
+\skillrow{Databases}{ {{ skills.databases | join(", ") }} }
+\skillrow{Concepts}{ {{ skills.concepts | join(", ") }} }
+
+% ---------- EDUCATION ----------
+\sectionTitle{Education}
+
+{% for edu in education_entries %}
+\role{ {{ edu.degree_line }} }{ {{ edu.date_range }} }%
+     { {{ edu.institution }} }{ {{ edu.location }} }
+{% if loop.first %}
+\begin{itemize}
+  \item \textbf{Relevant Coursework:} {{ coursework | join(", ") }}
+  {% for detail in edu.details %}
+  \item {{ detail }}
+  {% endfor %}
+\end{itemize}
+{% elif edu.details %}
+\begin{itemize}
+  {% for detail in edu.details %}
+  \item {{ detail }}
+  {% endfor %}
+\end{itemize}
+{% endif %}
+{% if not loop.last %}\vspace{4pt}{% endif %}
+{% endfor %}
+
+% ---------- EXPERIENCE ----------
+\sectionTitle{Experience}
+
+{% for exp in experience_entries %}
+\role{ {{ exp.title }} }{ {{ exp.date_range }} }%
+     { {{ exp.company }} }{ {{ exp.location }} }
+\begin{itemize}
+  {% for bullet in exp.bullets %}
+  \item {{ bullet }}
+  {% endfor %}
+\end{itemize}
+{% if not loop.last %}\vspace{2pt}{% endif %}
+{% endfor %}
+
+% ---------- PROJECTS (SELECTED — top 3 by JD similarity) ----------
+\sectionTitle{Projects}
+
+{% for proj in projects_top3 %}
+\project%
+  { {{ proj.name }}~\ghlink{ {{ proj.github_url }} }{% if proj.live_url %}~\livelink{ {{ proj.live_url }} }{% endif %} }%
+  { {{ proj.date_range }} }%
+  { {{ proj.tech_stack | join(", ") }} }
+\begin{itemize}
+  {% for bullet in proj.bullets %}
+  \item {{ bullet }}
+  {% endfor %}
+\end{itemize}
+{% if not loop.last %}\vspace{2pt}{% endif %}
+
+{% endfor %}
+
+% ---------- OTHER PROJECTS (SELECTED — ranks 4-6, one line each) ----------
+\sectionTitle{Other Projects}
+\begin{itemize}
+  {% for proj in projects_other3 %}
+  \item \textbf{ {{ proj.name }} }~\ghlink{ {{ proj.github_url }} }{% if proj.live_url %}~\livelink{ {{ proj.live_url }} }{% endif %}
+        \ --- {{ proj.tech_stack_short | join(", ") }} --- {{ proj.one_line_summary }}
+  {% endfor %}
+\end{itemize}
+
+% ---------- AWARDS & CERTIFICATIONS ----------
+{% if awards_entries %}
+\sectionTitle{Awards \& Certifications}
+\begin{itemize}
+  {% for award in awards_entries %}
+  \item {{ award }}
+  {% endfor %}
+\end{itemize}
+{% endif %}
+
+\end{document}

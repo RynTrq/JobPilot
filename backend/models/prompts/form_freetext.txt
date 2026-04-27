@@ -1,0 +1,26 @@
+# id: form_freetext@2.0.0
+# specialist: Form_FreeText
+# default_model: mlx-community/Qwen2.5-3B-Instruct-4bit
+# temperature: 0.3
+# max_tokens: 220
+# schema: backend/contracts.py:FormFreeTextAnswer
+# updated: 2026-04-25
+# eval: tests/evals/form_freetext/golden.jsonl
+# notes:
+#  - Candidate facts come only from ground truth.
+#  - Output must not invent dates, awards, employers, or claims.
+
+Answer a free-text application form question using the candidate's ground-truth facts. Write in the first person. Keep the answer within the character limit specified by the form. Never invent facts not present in the ground truth.
+
+QUESTION: {{question}}
+CHARACTER LIMIT: {{char_limit_or_none}}
+JOB CONTEXT: {{job_one_liner}}
+
+RELEVANT GROUND TRUTH:
+{{relevant_ground_truth}}
+
+Rules:
+- Answer directly.
+- Stay within the character limit.
+- Do not repeat the question.
+- Plain text. No markdown.

@@ -1,0 +1,67 @@
+\documentclass[11pt,a4paper]{article}
+
+\IfFileExists{glyphtounicode.tex}{
+  \input{glyphtounicode}
+  \pdfgentounicode=1
+}{}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.75in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+\usepackage{lmodern}
+\IfFileExists{microtype.sty}{\usepackage{microtype}}{}
+\usepackage{setspace}
+
+\definecolor{sectionblue}{HTML}{1F4E79}
+\definecolor{textgray}{HTML}{333333}
+\color{textgray}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{7pt}
+\pagenumbering{gobble}
+\setstretch{1.10}
+
+\begin{document}
+
+\begin{center}
+  {\Huge\textbf{{{ name }}}}\\[3pt]
+  {\large {{ headline }}}\\[5pt]
+  {{ location }} \textbar{}
+  {{ phone }} \textbar{}
+  \href{mailto:{{ email }}}{{{ email }}} \textbar{}
+  \href{{{ portfolio_url }}}{{{ portfolio_label }}} \textbar{}
+  \href{{{ github_url }}}{{{ github_label }}} \textbar{}
+  \href{{{ linkedin_url }}}{{{ linkedin_label }}}
+\end{center}
+
+\vspace{2pt}
+\hfill {{ date }}
+\vspace{4pt}
+
+{\color{sectionblue}\hrule height 0.6pt}
+\vspace{12pt}
+
+Dear {{ salutation_target }} Hiring Team,
+
+\vspace{4pt}
+
+I am writing to apply for the \textbf{{{ role_title }}} position at \textbf{{{ company }}}, which I found on your careers page. {{ company_hook }} {{ strongest_credential }}
+
+{{ proof_paragraph }}
+
+I am confident that my background in {{ closing_domain }} and hands-on work with {{ closing_project }} align directly with what {{ company }} is building. I would welcome the opportunity to discuss this further; a 20-minute call or screen would be enough to demonstrate what I can contribute. Thank you for your time and consideration.
+
+\vspace{14pt}
+
+Sincerely,
+
+\vspace{18pt}
+
+\textbf{{{ name }}}\\
+{\small
+{{ phone }} \textbar{}
+\href{mailto:{{ email }}}{{{ email }}} \textbar{}
+\href{{{ linkedin_url }}}{{{ linkedin_label }}}
+}
+
+\end{document}

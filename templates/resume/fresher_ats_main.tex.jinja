@@ -1,0 +1,172 @@
+% ============================================================
+% FRESHER RESUME TEMPLATE — ATS-Safe · Clean · Modern
+% Section order is locked: Header, Profile, Technical Skills,
+% Education, Experience, Projects, Other Projects,
+% Awards and Certifications.
+% ============================================================
+\documentclass[11pt,a4paper]{article}
+
+% ---------- ATS SAFE ----------
+\IfFileExists{glyphtounicode.tex}{
+  \input{glyphtounicode}
+  \pdfgentounicode=1
+}{}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.60in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{lmodern}
+\IfFileExists{microtype.sty}{\usepackage{microtype}}{}
+
+% ---------- STYLE ----------
+\definecolor{sectionblue}{HTML}{1F4E79}
+\definecolor{textgray}{HTML}{333333}
+\color{textgray}
+\linespread{1.03}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+\pagenumbering{gobble}
+
+\setlist[itemize]{
+  leftmargin=14pt,
+  itemsep=1.5pt,
+  topsep=2pt,
+  label=\textendash
+}
+
+% ---------- SECTION TITLE ----------
+\newcommand{\sectionTitle}[1]{%
+  \vspace{8pt}
+  {\color{sectionblue}\large\bfseries\MakeUppercase{#1}}\par
+  \vspace{2pt}
+  {\color{sectionblue}\hrule height 0.6pt}
+  \vspace{5pt}
+}
+
+% ---------- ROLE ROW ----------
+% #1 Bold left (title/degree) #2 right (dates)
+% #3 Italic left (org / school)  #4 Italic right (location / percentage / note)
+\newcommand{\role}[4]{%
+  \textbf{#1} \hfill {\small #2}\\[-1pt]
+  {\small\textit{#3} \hfill \textit{#4}}\par
+  \vspace{1pt}
+}
+
+% ---------- PROJECT ROW ----------
+\newcommand{\project}[3]{%
+  \textbf{#1} \hfill {\small #2}\\[-1pt]
+  {\small\textit{#3}}\par
+  \vspace{1pt}
+}
+
+% ---------- LINK BADGES ----------
+\newcommand{\ghlink}[1]{%
+  {\normalfont\small\color{sectionblue}%
+   [\href{#1}{GitHub}]}}
+\newcommand{\livelink}[1]{%
+  {\normalfont\small\color{sectionblue}%
+   [\href{#1}{Live}]}}
+
+% ---------- SKILL ROW ----------
+\newcommand{\skillrow}[2]{%
+  \textbf{#1:} #2\par\vspace{2pt}
+}
+
+% ============================================================
+\begin{document}
+% ============================================================
+
+% ---------- HEADER ----------
+\begin{center}
+  {\Huge\textbf{{{ name }}}}\\[3pt]
+  {\large {{ headline }}}\\[5pt]
+  {{ location }} \textbar{}
+  {{ phone }} \textbar{}
+  \href{mailto:{{ email }}}{{{ email }}} \textbar{}
+  \href{{{ portfolio_url }}}{{{ portfolio_label }}} \textbar{}
+  \href{{{ github_url }}}{{{ github_label }}} \textbar{}
+  \href{{{ linkedin_url }}}{{{ linkedin_label }}}
+\end{center}
+
+% ---------- PROFILE ----------
+\sectionTitle{PROFILE}
+{{ profile_summary }}
+
+% ---------- TECHNICAL SKILLS ----------
+\sectionTitle{TECHNICAL SKILLS}
+{% for row in skill_rows %}
+\skillrow{{{ row.category }}}{{{ row.skills }}}
+{% endfor %}
+
+% ---------- EDUCATION ----------
+% Education sits above Experience — for a fresher the degree is the #1
+% credential. Entries are rendered in the order provided; the Bachelor row
+% is expected first (with coursework), Class XII / X rows follow with a
+% percentage note on the right instead of location.
+\sectionTitle{EDUCATION}
+{% for edu in education %}
+\role{{{ edu.title }}}{{{ edu.date_range }}}%
+     {{{ edu.institution }}}{{{ edu.right_note }}}
+{% if edu.coursework %}
+\begin{itemize}
+  \item Structured \textbf{Relevant Coursework:} {{ edu.coursework }}
+\end{itemize}
+\vspace{4pt}
+{% else %}
+\vspace{2pt}
+{% endif %}
+{% endfor %}
+
+% ---------- EXPERIENCE ----------
+\sectionTitle{EXPERIENCE}
+{% for exp in experience %}
+\role{{{ exp.title }}}{{{ exp.date_range }}}%
+     {{{ exp.organization }}}{{{ exp.location }}}
+\begin{itemize}
+{% for bullet in exp.bullets %}
+  \item {{ bullet }}
+{% endfor %}
+\end{itemize}
+{% endfor %}
+
+% ---------- PROJECTS ----------
+% Exactly 3 projects — each with 3–4 strong, quantified bullets.
+% Links render as badges: [GitHub] and/or [Live] next to the project name.
+\sectionTitle{PROJECTS}
+{% for project in main_projects %}
+\project%
+  {{{ project.name }}{% if project.github_url %}~\ghlink{{{ project.github_url }}}{% endif %}{% if project.live_url %}~\livelink{{{ project.live_url }}}{% endif %}}%
+  {{{ project.period }}}%
+  {{{ project.tech_stack }}}
+\begin{itemize}
+{% for bullet in project.bullets %}
+  \item {{ bullet }}
+{% endfor %}
+\end{itemize}
+{% endfor %}
+
+% ---------- OTHER PROJECTS ----------
+% Breadth signal only. Strictly ONE line each. No per-project bullets —
+% that would turn this into a second Projects section.
+{% if other_projects %}
+\sectionTitle{OTHER PROJECTS}
+\begin{itemize}
+{% for project in other_projects %}
+  \item Built \textbf{{{ project.name }}}{% if project.github_url %}~\ghlink{{{ project.github_url }}}{% endif %}{% if project.live_url %}~\livelink{{{ project.live_url }}}{% endif %} \ -- {{ project.tech_stack }} -- {{ project.description }}
+{% endfor %}
+\end{itemize}
+{% endif %}
+
+% ---------- AWARDS & CERTIFICATIONS ----------
+% Merged into one section — two bullets is too thin for two separate
+% sections on a fresher resume.
+\sectionTitle{AWARDS \& CERTIFICATIONS}
+\begin{itemize}
+{% for item in awards_certifications %}
+  \item Validated {{ item }}
+{% endfor %}
+\end{itemize}
+
+\end{document}

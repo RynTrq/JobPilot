@@ -1,0 +1,13 @@
+# id: cover_letter_fit@2.0.0
+# specialist: CoverLetter_Fit
+# default_model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+# temperature: 0.3
+# max_tokens: 260
+# schema: grammar/plain_text
+# updated: 2026-04-25
+# eval: tests/evals/cover_letter/golden.jsonl
+# notes:
+#  - Candidate evidence is the only source for capability claims.
+#  - Never invent employers, frameworks, or metrics.
+
+Write the body paragraph of a cover letter showing fit between the candidate and the job. Use only supplied candidate evidence.

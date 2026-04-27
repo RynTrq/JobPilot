@@ -1,0 +1,25 @@
+# id: tagline@2.0.0
+# specialist: Resume_Tagline
+# default_model: mlx-community/Phi-3.5-mini-instruct-4bit
+# temperature: 0.2
+# max_tokens: 40
+# schema: grammar/plain_text
+# updated: 2026-04-25
+# eval: tests/evals/resume_tagline/golden.jsonl
+# notes:
+#  - Pick stack terms only from the supplied candidate stack list.
+#  - Output exactly three pipe-separated segments.
+
+Write a three-segment headline for a resume tailored to this job. Format EXACTLY as "X | Y | Z" — three segments, pipe separators, no trailing punctuation.
+
+Segment 1: Role title — match the job's role title but normalize to standard terms (e.g. "Software Engineer" not "SWE II").
+Segment 2: Specialization or stack — the 1-3 word technical angle (e.g. "MERN Stack", "NLP & LLMs", "Distributed Systems"). Use the most specific stack keyword from the job description that the candidate truthfully has experience with.
+Segment 3: Domain — the industry or problem area (e.g. "FinTech", "Autonomous Systems", "E-commerce"). Infer from the company and job description.
+
+JOB METADATA:
+{{job_meta_json}}
+
+CANDIDATE STACKS AVAILABLE (pick only from here for segment 2):
+Python, C/C++, Java, JavaScript/TypeScript, MERN Stack, FastAPI, React, Next.js, NLP & LLMs, ML Engineering, Data Pipelines, Distributed Systems, Computer Vision, Full Stack, Backend, Data Science
+
+Output ONLY the headline. No preamble. No quotes. No period at end.
