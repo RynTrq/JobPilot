@@ -13,15 +13,24 @@ __pycache__/
 *$py.class
 *.so
 .pytest_cache/
+*.egg-info/
 
 # Data and Privacy (Highly critical to ignore personal projects and profiles)
 data/My_Ground-info/
+data/ground_truth/
 data/browser-profile/
 data/logs/
 data/outputs/
 data/*.json
+data/**/*.json
 data/*.db
+data/*.db-*
+data/**/*.db
+data/**/*.db-*
 data/*.jsonl
+data/**/*.jsonl
+data/*.pkl
+data/**/*.pkl
 
 # macOS
 .DS_Store
@@ -53,3 +62,5 @@ careem.html
 test_enum.py
 test_react.py
 test_react2.py
+# Added by code-review-graph
+.code-review-graph/

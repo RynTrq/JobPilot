@@ -191,6 +191,12 @@ CONFIRMATION_TEXT_PATTERNS = [
     "Application received",
     "You have successfully applied",
     "Application complete",
+    # Workable-specific confirmation text
+    "Your application was submitted",
+    "application has been submitted",
+    "Thanks for applying",
+    "Great! Your application",
+    "successfully submitted your application",
 ]
 
 REVIEW_TEXT_PATTERNS = [
@@ -229,6 +235,46 @@ VALIDATION_ERROR_TEXT_PATTERNS = [
 ]
 
 SOCIAL_ENTRY_TERMS = ("linkedin", "indeed", "monster", "glassdoor", "upload", "autofill")
+NON_APPLICATION_WIDGET_MARKERS = (
+    "ask anything",
+    "chat",
+    "chatbot",
+    "create job alert",
+    "get notified",
+    "job alert",
+    "manage alerts",
+    "notified",
+    "notification",
+    "recommendations",
+    "similar jobs",
+    "sign up to receive",
+    "subscribe",
+)
+STRONG_APPLICATION_FIELD_MARKERS = (
+    "address line",
+    "cover letter",
+    "current company",
+    "current title",
+    "cv",
+    "first name",
+    "full name",
+    "github",
+    "last name",
+    "legal name",
+    "linkedin",
+    "mailing address",
+    "mobile",
+    "phone",
+    "portfolio",
+    "resume",
+    "right to work",
+    "street address",
+    "sponsor",
+    "surname",
+    "visa",
+    "work authorization",
+    "website",
+)
 APPLY_TRIGGER_KEYWORDS = (
     "apply",
     "apply now",
@@ -438,6 +484,37 @@ async def handle_entry_method_selection(page) -> None:
     raise NavigationError(f"Manual entry option was detected but could not be selected on {getattr(page, 'url', '')}")
 
 
+async def wait_for_post_submit_confirmation(page, timeout_ms: int = 12000) -> bool:
+    """Poll for a confirmation page after submit click on React/SPA forms.
+
+    Workable and similar SPAs don't trigger a full navigation after submit —
+    they replace page content client-side.  `networkidle` alone is unreliable
+    because the SPA may keep background requests alive.  This polls every 500ms
+    for up to `timeout_ms` and returns True if a confirmation is detected.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout_ms / 1000
+    while asyncio.get_event_loop().time() < deadline:
+        page_url = (getattr(page, "url", "") or "").lower()
+        if any(token in page_url for token in ("/confirmation", "/success", "/thank-you", "/submitted")):
+            return True
+        if await _page_contains_any_text(page, CONFIRMATION_TEXT_PATTERNS):
+            return True
+        # Also detect Workable's "Submitting" → disappear transition:
+        # once the submit button is gone and form inputs are gone, the SPA
+        # transitioned away from the form.
+        try:
+            submit_gone = not await page.query_selector("button[type='submit']:visible, button:has-text('Submit'):visible, button:has-text('Submitting'):visible")
+            inputs_gone = not await page.query_selector("input[type='text']:visible, input[type='email']:visible, textarea:visible, input[type='file']:visible")
+            if submit_gone and inputs_gone:
+                await asyncio.sleep(0.5)
+                if await _page_contains_any_text(page, CONFIRMATION_TEXT_PATTERNS):
+                    return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+    return False
+
+
 async def detect_page_type(page) -> str:
     page_url = (getattr(page, "url", "") or "").lower()
     if any(token in page_url for token in ("/confirmation", "/success", "/thank-you", "/submitted")):
@@ -626,12 +703,12 @@ async def _page_has_visible_form(page) -> bool:
                 if "apply" in action or "application" in action:
                     return True
                 continue
-            if await _is_application_input(element):
+            if await _is_application_input(page, element):
                 return True
     return False
 
 
-async def _is_application_input(element) -> bool:
+async def _is_application_input(page, element) -> bool:
     try:
         input_type = ((await element.get_attribute("type")) or "").lower()
         name = ((await element.get_attribute("name")) or "").lower()
@@ -642,11 +719,58 @@ async def _is_application_input(element) -> bool:
     except Exception as exc:
         log.debug("application_input_introspection_failed", error=str(exc))
         return False
-    if input_type == "email" or input_type == "file":
+    page_url = (getattr(page, "url", "") or "").lower()
+    if input_type == "file":
         return True
+    if input_type == "email":
+        if await _element_in_non_application_widget(element):
+            return False
+        if any(token in page_url for token in ("/apply", "/application", "job_application")):
+            return True
+        context_text = await _element_context_text(element)
+        return any(marker in context_text for marker in STRONG_APPLICATION_FIELD_MARKERS)
     if input_type == "text" and any(token in labelish for token in ("name", "email", "phone", "first", "last")):
+        if await _element_in_non_application_widget(element):
+            return False
         return True
     return False
+
+
+async def _element_in_non_application_widget(element) -> bool:
+    context_text = await _element_context_text(element)
+    if any(marker in context_text for marker in STRONG_APPLICATION_FIELD_MARKERS):
+        return False
+    return any(marker in context_text for marker in NON_APPLICATION_WIDGET_MARKERS)
+
+
+async def _element_context_text(element) -> str:
+    try:
+        return await element.evaluate(
+            r"""
+            (el) => {
+              const text = (node) => (node?.innerText || node?.textContent || '').replace(/\s+/g, ' ').trim();
+              const selectors = [
+                'form',
+                'aside',
+                'section',
+                'article',
+                '[role="form"]',
+                '[role="search"]',
+                '[class*="alert"]',
+                '[class*="similar"]',
+                '[class*="recommend"]',
+                '[class*="chat"]',
+                '[id*="alert"]',
+                '[id*="chat"]',
+              ];
+              const node = el.closest(selectors.join(','));
+              return text(node || el.parentElement || el).toLowerCase();
+            }
+            """
+        )
+    except Exception as exc:
+        log.debug("element_context_text_failed", error=str(exc))
+        return ""
 
 
 async def _button_opens_new_tab(page, element) -> bool:
@@ -762,11 +886,10 @@ async def _find_apply_button_by_text(page):
 
 async def _entry_method_visible(page) -> bool:
     try:
-        body_text = ((await page.locator("body").inner_text()) or "").lower()
+        return await _find_manual_entry_control(page) is not None
     except Exception as exc:
         log.debug("entry_method_visible_probe_failed", url=getattr(page, "url", ""), error=str(exc))
         return False
-    return any(indicator in body_text for indicator in ENTRY_METHOD_INDICATORS)
 
 
 async def _find_manual_entry_control(page):

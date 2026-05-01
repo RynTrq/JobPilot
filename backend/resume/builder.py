@@ -5,7 +5,7 @@ from typing import Any
 
 from jinja2 import Template
 
-from backend.config import DATA_DIR, ROOT_DIR
+from backend.config import DATA_DIR, GROUND_TRUTH_DIR, ROOT_DIR
 from backend.models.generator import sentence_count, word_count
 from backend.resume.bullet_picker import BulletPicker
 from backend.specialists.jd_extractor import JDExtractor
@@ -283,11 +283,11 @@ def _render_prompt(name: str, **context: Any) -> str:
 
 
 def _load_defaults() -> dict[str, Any]:
-    path = DATA_DIR / "defaults.json"
+    path = _user_file_path("defaults.json")
     if not path.exists():
         raise FileNotFoundError(
             f"missing defaults file at {path}. Run `python scripts/seed_defaults.py` "
-            "or copy templates/defaults.json into data/."
+            "or create data/ground_truth/defaults.json."
         )
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -296,10 +296,18 @@ def _load_defaults() -> dict[str, Any]:
 
 
 def _load_projects_library() -> dict[str, Any]:
-    path = DATA_DIR / "projects_library.json"
+    path = _user_file_path("projects_library.json")
     if not path.exists():
-        raise FileNotFoundError(f"missing {path}; run scripts/build_projects_library.py")
+        raise FileNotFoundError(f"missing {path}; create data/ground_truth/projects_library.json")
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"projects_library.json is not valid JSON: {exc}") from exc
+
+
+def _user_file_path(name: str) -> Any:
+    canonical = GROUND_TRUTH_DIR / name
+    legacy = DATA_DIR / name
+    if canonical.exists() or not legacy.exists():
+        return canonical
+    return legacy

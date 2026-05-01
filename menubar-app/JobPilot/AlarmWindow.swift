@@ -38,6 +38,11 @@ struct AlarmWindow: View {
                     state.snoozeAlarm()
                 }
                 .disabled(state.alarmIsSnoozed)
+                Button("Skip Always") {
+                    Task { await state.skipAlarmField() }
+                }
+                .foregroundStyle(.orange)
+                .help("Leave this field blank now and automatically skip it on all future runs.")
                 Spacer()
                 Button("Show Automation Browser") {
                     Task { await state.focusAutomationBrowser() }

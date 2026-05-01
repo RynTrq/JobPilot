@@ -1,319 +1,92 @@
 # JobPilot
 
-**JobPilot supports a wide variety of job application platforms and ATS. If you encounter an unsupported site or workflow issue, please reach out at trqynzzz@gmail.com. I am actively expanding support and will quickly build new adapters or resolve any bugs.**
+JobPilot is a local macOS job-application copilot. It reads jobs from career pages and ATS platforms, scores whether they fit the user, opens application forms in Chromium, fills fields from the user's ground truth, generates tailored resume and cover-letter PDFs when needed, and keeps a human in the loop for classifier review, unknown fields, CAPTCHA, login, validation problems, and final submit approval.
 
-JobPilot is a local job-application assistant for macOS. It runs a Python FastAPI backend, drives a Chromium browser with Playwright, fills job application forms from your local profile data, generates tailored resume and cover-letter PDFs when needed, and exposes a native macOS menu-bar UI for starting runs, reviewing work, handling manual interventions, and viewing history.
+The most important setup idea is simple: JobPilot is not supposed to be about the original developer. It becomes about the person using it through the `data/ground_truth/` directory. A fresh user adds their own verified facts there, and resume generation, cover-letter generation, classifier fit scoring, and form filling all start using that user's files.
 
-JobPilot is designed to keep the human in control. Dry Run is the default mode. Real Submit must be enabled explicitly, and final review is enabled by default unless you opt into automatic final submission.
+Dry Run is the default. Real Submit must be enabled intentionally.
 
 ## Fresh Clone Setup
 
-If you are starting from a brand-new Mac, install these pieces before running JobPilot end to end:
-
-| Install | Why it is needed | Where to get it |
-| --- | --- | --- |
-| Xcode | Builds and runs the Swift menu-bar app, and provides the AppKit bridge used by backend alerts. | Mac App Store |
-| Xcode Command Line Tools | Gives you the compiler and SDK pieces Xcode expects. | `xcode-select --install` |
-| `uv` | Creates the Python environment and installs the Python dependencies. | Astral's installer script |
-| Python 3.11 | Required by the backend runtime and locked by `pyproject.toml`. | `uv python install 3.11` |
-| Playwright Chromium | Browser automation target for the app run. | `playwright install chromium` |
-| LaTeX distribution | Compiles the generated resume and cover-letter PDFs. | MacTeX or BasicTeX |
-| MongoDB, optional | Stores the optional mirrored application ledger. | MongoDB Atlas or a local MongoDB server |
-| Cloud LLM keys, optional | Enable cloud fallback routing when local generation is not enough. | Environment variables |
-
-Then install the toolchain and project dependencies:
+Start from a clean clone:
 
 ```bash
+git clone <your-repo-url>
+cd JobPilot-main/jobpilot
+```
+
+Install the system tools first:
+
+| Tool | Required | Why JobPilot needs it |
+| --- | --- | --- |
+| Xcode | Yes, for the macOS app | Builds and runs the Swift menu-bar app. |
+| Xcode Command Line Tools | Yes | Provides compiler and SDK tools used by Python and Xcode dependencies. |
+| `uv` | Yes | Creates the Python 3.11 environment and installs locked dependencies. |
+| Python 3.11 | Yes | The backend is pinned to Python `>=3.11,<3.12`. |
+| Playwright Chromium | Yes | Browser automation target for application forms. |
+| LaTeX, MacTeX or BasicTeX | Yes for resume/cover PDFs | Compiles generated `.tex` files into PDFs. |
+| MongoDB | Optional | Optional mirror for application records. SQLite works locally without it. |
+| Cloud LLM API keys | Optional | Enables cloud fallback providers. Local/fallback behavior works without keys. |
+
+Install commands:
+
+```bash
+xcode-select --install
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv python install 3.11
 uv venv --python 3.11
 source .venv/bin/activate
 uv pip install -e ".[dev]"
-playwright install chromium
+uv run playwright install chromium
 ```
 
-If you want PDF generation, install MacTeX or BasicTeX before the first resume or cover-letter run. If you want cloud fallback routing, set the provider API keys in `.env` or your shell environment. If you want the Mongo mirror, set `MONGO_URI` before starting the backend.
+Install MacTeX or BasicTeX separately before generating PDFs.
 
-First-run notes:
+## Required Directory Structure
 
-- `sentence-transformers` downloads `BAAI/bge-small-en-v1.5` the first time the encoder runs.
-- `mlx-lm` downloads the local generation model only if you disable `GENERATOR_DISABLED`.
-- Playwright will download Chromium the first time you run the install command above.
-- The backend will create `data/jobpilot.db`, `data/logs/`, and `data/outputs/` automatically.
-
-## Tech Stack
-
-### Runtime Layers
-
-| Layer | Where in repo | What it is | How JobPilot uses it |
-| --- | --- | --- | --- |
-| Backend API and orchestration | `backend/main.py`, `backend/conductor.py`, `backend/api/*`, `backend/config.py` | `FastAPI`, `Uvicorn`, `Pydantic`, `python-dotenv`, `structlog` | Boots the runtime, loads config and stores, wires the browser, encoder, classifier, router, generator, and human-intervention gates, then exposes the REST and stream endpoints. |
-| Browser automation | `backend/scraping/browser.py`, `backend/scraping/adapters/*`, `backend/form/*` | `Playwright`, `playwright-stealth` | Opens Chromium, navigates ATS pages, finds forms, types answers, clicks next and submit buttons, and handles CAPTCHA, login, and validation blockers. |
-| Parsing, retries, and matching | `backend/scraping/job_page.py`, `backend/form/filler.py`, `backend/form/navigator.py` | `BeautifulSoup4`, `Trafilatura`, `RapidFuzz`, `Tenacity` | Pulls readable job text from noisy pages, normalizes it, fuzzy-matches labels and buttons, and retries transient actions instead of failing too early. |
-| Embeddings and fit scoring | `backend/models/encoder.py`, `backend/models/classifier.py`, `backend/models/classifier_feedback.py` | `sentence-transformers`, `scikit-learn`, `numpy` | Turns job descriptions and profile facts into vectors, scores job fit, and nudges scores using stored pass/fail feedback. |
-| Form answering and learned memory | `backend/form/field_answerer.py`, `backend/storage/ground_truth.py`, `backend/storage/learned_answers.py`, `backend/storage/button_memory.py`, `backend/specialists/translator.py` | Ground-truth JSON/YAML, SQLite, translation cache | Answers structured fields from verified profile data, reuses learned answers, caches translations, and remembers button names so repeat runs get steadier. |
-| Routing and generation | `backend/llm/router.py`, `backend/llm/providers.py`, `backend/models/generator.py`, `backend/specialists/*` | MLX local models and OpenAI-compatible cloud clients | Chooses local or cloud generation based on privacy, latency, schema needs, and provider availability, then produces resume text, field answers, extraction JSON, and translations. |
-| Resume and cover-letter generation | `backend/resume/*`, `templates/*` | `Jinja2`, LaTeX toolchain | Picks the most relevant projects and bullets, builds a job-specific resume context, renders LaTeX, and compiles PDFs. |
-| Storage and persistence | `backend/storage/sqlite_db.py`, `backend/storage/mongo_db.py`, `data/*` | SQLite, `pymongo`, JSON, YAML | Stores runs, applications, per-mode history, pending actions, learned answers, site limits, translation cache, feedback, and optional Mongo mirrors; keeps the user profile and library files under `data/`. |
-| Alerts and manual takeover | `backend/alarm/*` | `pyobjc` with `AppKit` | Emits native macOS attention signals when the backend needs a human to take over for CAPTCHA, approval, login, or validation issues. |
-| macOS menu-bar app | `menubar-app/JobPilot/*` | `Swift`, `SwiftUI`, `AppKit`, `Combine` | Provides the native status-bar UI, history views, approval prompts, browser controls, and the `BackendClient` bridge to the Python backend. |
-| Tooling and tests | `pyproject.toml`, `uv.lock`, `tests/*` | `pytest`, `pytest-asyncio`, `httpx`, `hypothesis`, `TexSoup` | Pins dependencies and validates API behavior, run-state transitions, document generation, and browser-driven edge cases. |
-
-### Models
-
-| Model or artifact | Where it is used | What it is for | How it is used |
-| --- | --- | --- | --- |
-| `BAAI/bge-small-en-v1.5` | `backend/models/encoder.py`, `backend/models/classifier.py`, `backend/form/field_answerer.py`, `backend/resume/bullet_picker.py` | Semantic embeddings | Encodes job descriptions, profile facts, field labels, and project text into 384-dimensional vectors for matching and ranking. If the model is unavailable, JobPilot falls back to a deterministic hashing encoder. |
-| `data/classifier.pkl` | `backend/models/classifier.py` | Trained fit classifier | If present, JobPilot loads the pickled classifier and uses it with embeddings to score fit. If it is missing, the code switches to heuristic scoring and still applies feedback-based adjustment from `classifier_feedback.jsonl`. |
-| `mlx-community/Qwen2.5-14B-Instruct-4bit` | `backend/models/generator.py` | Local text generator | MLX loads this model only when `GENERATOR_DISABLED=0`. The default configuration keeps local generation off, so fresh clones do not need the model unless you explicitly enable it. |
-| `mlx-community/Qwen2.5-1.5B-Instruct-4bit`, `mlx-community/Qwen2.5-3B-Instruct-4bit`, `mlx-community/Qwen2.5-7B-Instruct-4bit` | `backend/llm/router.py` | Local routing targets | The router chooses the small model for short completions, the JSON-friendly model for structured output, and the larger reasoning model for more demanding prompts while keeping sensitive work local. |
-| `llama-3.1-8b-instant`, `llama-3.3-70b-versatile`, `gemini-2.5-flash` | `backend/llm/router.py`, `backend/llm/providers.py` | Cloud routing targets | If cloud keys are configured, the router can send work to Groq or Gemini models for low-latency or higher-quality fallback paths. |
-
-Cloud provider adapters live in `backend/llm/providers.py` and are only created for keys present in the environment. Supported backends are Groq, Gemini, Cerebras, Mistral, and OpenRouter.
-
-## What It Does
-
-- Lists jobs from supported career pages and ATS platforms.
-- Extracts job descriptions and checks listing liveness.
-- Scores job fit with local classifier and specialist logic.
-- Generates tailored resume and cover-letter artifacts when a form asks for them.
-- Fills browser forms with profile, ground-truth, learned, and generated answers.
-- Pauses for approval, unknown fields, login, CAPTCHA, validation blockers, and unsupported flows.
-- Tracks separate History outcomes for Dry Run and Real Submits.
-- Stores local state in SQLite and can optionally mirror canonical application records to MongoDB.
-
-## Important Safety Behavior
-
-Dry Run fills the form and stops before the final submit click. Before a dry run is marked complete, JobPilot audits required fields, including browser-required and asterisk-marked fields. If required values are missing, it tries to fill them or asks the user before declaring success.
-
-Real Submit clicks the final submit button only when live submit is enabled. After clicking, JobPilot checks for confirmation pages and browser validation errors. If the browser flags missing or invalid fields, JobPilot retries filling once and asks the user when needed. A real submission is not marked successful while validation errors remain.
-
-CAPTCHA handling is conservative. On the first CAPTCHA detection for a job, JobPilot waits, attempts one safe continue/next-style recovery, and checks again. If CAPTCHA appears again or persists, it raises manual takeover with: `CAPTCHA detected — Human intervention required.`
-
-History is mode-specific. A green Dry Run entry cannot be dry-run again. A green Real Submit entry cannot be real-submitted again. Red entries remain actionable in their section.
-
-## Project Layout
+Create this local structure before running a real application workflow:
 
 ```text
-backend/                    FastAPI backend and orchestration
-backend/api/                REST and stream routes
-backend/alarm/              Native macOS alert and takeover bridge
-backend/form/               Form filling, validation, CAPTCHA/manual takeover logic
-backend/llm/                Model routing and cloud client adapters
-backend/models/             Embeddings, classifier, generator, and feedback logic
-backend/resume/             Resume and cover-letter context builder
-backend/scraping/           Browser driver, page extraction, adapters, and dedup helpers
-backend/specialists/        JD extraction, translation, grounded free-text helpers
-backend/storage/            SQLite, MongoDB, profile stores, learned answers
-menubar-app/JobPilot/       Swift menu-bar application
-templates/                  LaTeX resume and cover-letter templates
-data/                       Local database, browser profile, profile inputs, logs, outputs
+jobpilot/
+  backend/
+  menubar-app/
+  templates/
+  data/
+    ground_truth/
+      ground_truth.json
+      candidate_profile.yaml
+      projects_library.json
+      bullet_library.json
+      defaults.json
+      classifier_feedback.jsonl        # auto-created after classifier reviews
+      classifier.pkl                   # optional; usually absent for a new user
+    browser-profile/                   # auto-created
+    logs/                              # auto-created
+    outputs/                           # auto-created
+    jobpilot.db                        # auto-created SQLite database
 ```
 
-## Configuration
+Do not commit `data/ground_truth/`. It contains private identity, employment, compensation, eligibility, and classifier preference data. The `.gitignore` excludes it.
 
-Create `.env` in the repository root as needed. The defaults are intentionally cautious.
+Backward compatibility: older local setups may have `data/ground_truth.json`, `data/projects_library.json`, `data/bullet_library.json`, `data/defaults.json`, and `data/My_Ground-info/profile/candidate_profile.yaml`. JobPilot can still read those if the new `data/ground_truth/` files are not present, but new users should use the directory above.
 
-```env
-JOBPILOT_HOST=127.0.0.1
-JOBPILOT_PORT=8765
+## Ground Truth Setup
 
-# Mode controls
-DRY_RUN=1
-AUTO_SUBMIT_WITHOUT_APPROVAL=0
-LIVE_MODE=0
+The `data/ground_truth/` directory is the user-owned brain of JobPilot.
 
-# Browser
-BROWSER_PERSISTENT=1
-BROWSER_USER_DATA_DIR=data/browser-profile
-BROWSER_STEALTH_LEVEL=2
+| File | Used by | Purpose |
+| --- | --- | --- |
+| `ground_truth.json` | Form filling, resume builder, cover-letter writer, fit rules, classifier heuristic | Canonical structured facts: identity, education, experience, projects, skills, preferences, EEOC defaults, free-form reusable answers. |
+| `candidate_profile.yaml` | Form filling, strict fit rules, resume builder | Policy-rich profile: work authorization, compensation rules, disclosure defaults, sensitive-answer policy, application guardrails. |
+| `projects_library.json` | Resume generation and free-text form answers | Project catalog with bullet variants and tags so JobPilot can select job-relevant proof. |
+| `bullet_library.json` | Resume bullet selection | Experience/project bullet variants keyed by stable IDs from `ground_truth.json`. |
+| `defaults.json` | Resume/generation fallbacks | Safe fallback text and skill pools when a generator cannot confidently produce output. |
+| `classifier_feedback.jsonl` | Classifier learning | Auto-created. Every classifier review appends a pass/fail training example. |
+| `classifier.pkl` | Optional classifier model | Optional trained model. A fresh user normally does not have this file. |
 
-# Optional Mongo mirror
-MONGO_URI=
-MONGO_DB=jobpilot
+### `data/ground_truth/ground_truth.json`
 
-# Model/provider behavior
-GENERATOR_DISABLED=1
-CLASSIFIER_THRESHOLD=0.65
-CLASSIFIER_AUTO_PASS=0
-
-# Optional cloud providers
-GROQ_API_KEY=
-GEMINI_API_KEY=
-CEREBRAS_API_KEY=
-MISTRAL_API_KEY=
-OPENROUTER_API_KEY=
-```
-
-Notes:
-
-- `DRY_RUN=1` means final submit clicks are skipped.
-- `DRY_RUN=0` enables real submit behavior, but the UI can also toggle this at runtime.
-- `AUTO_SUBMIT_WITHOUT_APPROVAL=0` means final approval is required.
-- `LIVE_MODE=1` shows/focuses the browser for easier observation. Warnings, missing fields, login, CAPTCHA, and errors still pause for user action.
-- `GENERATOR_DISABLED=1` keeps LLM generation disabled unless you configure providers.
-- `JOBPILOT_PORT` is the backend listen port.
-- `JOBPILOT_BACKEND_PORT` is the port the menu-bar app uses when connecting to the backend.
-
-## Profile Data
-
-JobPilot needs local ground-truth files before it can fill forms or generate job-specific documents. Create these files under `data/`:
-
-```text
-data/My_Ground-info/profile/candidate_profile.yaml
-data/ground_truth.json
-data/projects_library.json
-data/bullet_library.json
-data/defaults.json
-```
-
-`candidate_profile.yaml` is the policy-rich profile. It controls identity, work authorization, preferences, disclosure defaults, compensation rules, sensitive identifier policy, and automation guardrails. The backend reads it as a plain mapping, so extra policy sections are fine as long as you keep the structure consistent. Save it exactly here:
-
-```text
-data/My_Ground-info/profile/candidate_profile.yaml
-```
-
-Use this shape. All top-level keys are required, even if some arrays are empty:
-
-```yaml
-schema_version: 1
-profile_id: your_name_or_handle
-last_reviewed: 2026-04-27
-
-identity:
-  legal_name: Your Legal Name
-  first_name: Your First Name
-  last_name: Your Last Name
-  preferred_name: Your Preferred Name
-  email:
-    primary: you@example.com
-    backup: optional@example.com
-  phone:
-    country_code: "+1"
-    number: "5551234567"
-  location:
-    city: Your City
-    country: Your Country
-  links:
-    linkedin: https://www.linkedin.com/in/your-profile
-    github: https://github.com/your-handle
-    portfolio: https://your-site.example
-
-sensitive_identifiers:
-  handling: local_only_remove_before_sharing
-  values:
-    national_id:
-      available: false
-      number: null
-      use_policy: never_without_manual_confirmation
-
-education:
-  - institution: University Name
-    city: City
-    country: Country
-    degree: Bachelor of Science
-    major: Computer Science
-    graduation_date: 2026-05-15
-    gpa:
-      value: 3.8
-      scale: 4.0
-    relevant_coursework:
-      - Data Structures and Algorithms
-      - Operating Systems
-
-awards_certifications:
-  - type: certification
-    title: Certification Name
-    issuer: Issuer
-    date_issued: 2025-01-01
-    credential_url: null
-    description: One sentence description.
-    skills:
-      - Python
-
-work_authorization:
-  authorized_countries:
-    - United States
-  sponsorship:
-    united_states:
-      now_requires: false
-      future_requires: false
-    default_outside_authorized_countries:
-      now_requires: true
-      future_requires: true
-
-job_preferences:
-  target_roles:
-    - Software Engineer
-    - Backend Engineer
-  industries:
-    - SaaS
-    - Developer Tools
-  locations:
-    scope: worldwide
-    willing_to_relocate: true
-    modes:
-      - remote
-      - hybrid
-      - onsite
-  earliest_start_date: 2026-06-01
-  employment_types:
-    - full_time
-  notice_period: 2 weeks
-
-compensation_policy:
-  target_salary:
-    currency: USD
-    amount: 100000
-  reveal_policy: only_when_required
-
-application_defaults:
-  background_check_willingness: "Yes"
-  pronouns: Prefer not to say
-  disclosures:
-    gender: Prefer not to say
-    race: Prefer not to say
-    veteran_status: I am not a protected veteran
-    disability: I do not wish to answer
-
-resume_strategy:
-  objective: Accurate, ATS-friendly resume tailored only from verified facts.
-  never_claim:
-    - Skills or employment not present in these source files.
-
-experience:
-  - organization: Company or Lab
-    title: Role Title
-    location: City, Country
-    start_date: 2025-01-01
-    end_date: 2025-06-01
-    responsibilities:
-      - Built or improved a specific system.
-    technologies:
-      - Python
-      - PostgreSQL
-
-standard_form_answer_policy:
-  company_interest: Use job/company facts; do not invent.
-  role_interest: Tie role to verified projects and experience.
-  about_self_default: Short professional summary from verified facts.
-
-sensitive_answer_policy:
-  salary_history: Prefer not to disclose unless legally required.
-  date_of_birth: Ask before filling.
-
-automation_rules:
-  role_matching: Apply only to roles matching preferences or explicit user override.
-  form_filling: Ask before submitting unknown required sensitive answers.
-```
-
-`ground_truth.json` is the structured resume/form evidence file. Save it exactly here:
-
-```text
-data/ground_truth.json
-```
-
-Use this shape:
+Use valid JSON with this schema:
 
 ```json
 {
@@ -333,7 +106,18 @@ Use this shape:
     "portfolio_url": "https://your-site.example",
     "pronouns": "Prefer not to say"
   },
-  "education": [],
+  "education": [
+    {
+      "institution": "University Name",
+      "degree": "Bachelor of Science",
+      "field": "Computer Science",
+      "start_month_year": "2022-08",
+      "end_month_year": "2026-05",
+      "gpa": null,
+      "honors": [],
+      "relevant_courses": ["Data Structures", "Operating Systems"]
+    }
+  ],
   "experience": [
     {
       "id": "exp_company_role_2025",
@@ -391,13 +175,116 @@ Use this shape:
 }
 ```
 
-`projects_library.json` is used by the resume builder to choose job-relevant projects. Save it exactly here:
+Rules:
 
-```text
-data/projects_library.json
+- Keep every top-level key, even if some arrays are empty.
+- Use stable snake_case `id` values for every experience and project. The same IDs are used by `bullet_library.json`.
+- Dates must be `YYYY-MM`, except `preferences.earliest_start_date`, which must be `YYYY-MM-DD`.
+- Do not add extra keys to `ground_truth.json`; the backend validates this file strictly.
+
+### `data/ground_truth/candidate_profile.yaml`
+
+Use YAML for broader policies and optional sections:
+
+```yaml
+schema_version: 1
+profile_id: your_name_or_handle
+last_reviewed: 2026-04-27
+
+identity:
+  legal_name: Your Legal Name
+  first_name: Your First Name
+  last_name: Your Last Name
+  preferred_name: Your Preferred Name
+  email:
+    primary: you@example.com
+    backup: optional@example.com
+  phone:
+    country_code: "+1"
+    number: "5551234567"
+  location:
+    city: Your City
+    country: Your Country
+  links:
+    linkedin: https://www.linkedin.com/in/your-profile
+    github: https://github.com/your-handle
+    portfolio: https://your-site.example
+
+sensitive_identifiers:
+  handling: local_only_remove_before_sharing
+  values:
+    national_id:
+      available: false
+      number: null
+      use_policy: never_without_manual_confirmation
+
+work_authorization:
+  authorized_countries:
+    - United States
+  sponsorship:
+    united_states:
+      now_requires: false
+      future_requires: false
+    default_outside_authorized_countries:
+      now_requires: true
+      future_requires: true
+
+job_preferences:
+  target_roles:
+    - Software Engineer
+    - Backend Engineer
+  industries:
+    - SaaS
+    - Developer Tools
+  locations:
+    scope: worldwide
+    willing_to_relocate: true
+    modes:
+      - remote
+      - hybrid
+      - onsite
+  earliest_start_date: 2026-06-01
+  employment_types:
+    - full_time
+  notice_period: 2 weeks
+
+compensation_policy:
+  target_salary:
+    currency: USD
+    amount: 100000
+  reveal_policy: only_when_required
+
+application_defaults:
+  background_check_willingness: "Yes"
+  pronouns: Prefer not to say
+  disclosures:
+    gender: Prefer not to say
+    race_ethnicity: Prefer not to say
+    veteran_status: Prefer not to say
+    disability: Prefer not to say
+
+resume_strategy:
+  objective: Accurate, ATS-friendly resume tailored only from verified facts.
+  never_claim:
+    - Skills, degrees, employers, metrics, or tools not present in the source files.
+
+standard_form_answer_policy:
+  company_interest: Use job/company facts; do not invent.
+  role_interest: Tie role to verified projects and experience.
+  about_self_default: Short professional summary from verified facts.
+
+sensitive_answer_policy:
+  salary_history: Prefer not to disclose unless legally required.
+  date_of_birth: Ask before filling.
+
+automation_rules:
+  role_matching: Apply only to roles matching preferences or explicit user override.
+  form_filling: Ask before submitting unknown required sensitive answers.
 ```
 
-Use this shape:
+The YAML reader accepts extra policy sections, so this is the best place for nuanced human rules.
+
+### `data/ground_truth/projects_library.json`
 
 ```json
 {
@@ -424,13 +311,7 @@ Use this shape:
 }
 ```
 
-`bullet_library.json` gives the bullet picker a direct map of project/experience IDs to bullet variants. Save it exactly here:
-
-```text
-data/bullet_library.json
-```
-
-Use this shape:
+### `data/ground_truth/bullet_library.json`
 
 ```json
 {
@@ -453,13 +334,7 @@ Use this shape:
 }
 ```
 
-`defaults.json` provides fallbacks for resume generation and LLM-free operation. Save it exactly here:
-
-```text
-data/defaults.json
-```
-
-Use this shape:
+### `data/ground_truth/defaults.json`
 
 ```json
 {
@@ -481,22 +356,54 @@ Use this shape:
     "concepts": ["Data Structures", "REST API Design"],
     "coursework": ["Operating Systems", "Database Systems"]
   },
-  "project_bullet": "Built a verified project component using the declared technology stack."
+  "project_bullet": "Built a verified project component using the declared technology stack.",
+  "grounded_answer": {
+    "answer_text": "UNKNOWN",
+    "source_keys_used": [],
+    "confidence_0_to_1": 0.0,
+    "unknown_flag": true,
+    "fallback_reason": "defaults"
+  },
+  "grounded_json": {}
 }
 ```
 
-### A Practical Prompt To Generate The Files
+## Ground Truth Validation
 
-You can ask an LLM to interview you and generate these files. Use a prompt like:
+After creating the files, run:
+
+```bash
+uv run python - <<'PY'
+from backend.storage.ground_truth import GroundTruth
+from backend.form.field_answerer import load_candidate_data, build_candidate_corpus
+
+gt = GroundTruth.load()
+candidate_data = load_candidate_data()
+corpus = build_candidate_corpus(candidate_data)
+
+print("ground_truth.json valid for:", gt.personal.full_name or "<name missing>")
+print("form-answer corpus facts:", len(corpus))
+print("projects:", len(gt.projects))
+print("experience:", len(gt.experience))
+PY
+```
+
+If this fails, fix the file named in the error before starting the backend.
+
+## Prompt To Create Ground Truth
+
+You can ask an LLM to interview the user and produce the files:
 
 ```text
-I am setting up JobPilot, a local job application automation assistant. Interview me one question at a time and gather only verified facts. Produce five files in the exact schemas below:
+I am setting up JobPilot, a local job application automation assistant.
+Interview me one question at a time and gather only verified facts.
+Produce these files exactly:
 
-1. data/My_Ground-info/profile/candidate_profile.yaml
-2. data/ground_truth.json
-3. data/projects_library.json
-4. data/bullet_library.json
-5. data/defaults.json
+1. data/ground_truth/ground_truth.json
+2. data/ground_truth/candidate_profile.yaml
+3. data/ground_truth/projects_library.json
+4. data/ground_truth/bullet_library.json
+5. data/ground_truth/defaults.json
 
 Rules:
 - Do not invent degrees, employers, metrics, links, salaries, work authorization, or skills.
@@ -505,117 +412,233 @@ Rules:
 - Every project and experience must have a stable snake_case id.
 - Bullet text must be truthful, specific, and grounded in the evidence I provide.
 - Output valid YAML for candidate_profile.yaml and valid JSON for the other four files.
+- Use the exact schemas from the JobPilot README.
 
-First ask me for identity/contact/location/links, then education, work authorization, job preferences, compensation policy, disclosures, experience, projects, skills, awards/certifications, and sensitive-answer policies.
+Ask first for identity/contact/location/links, then education, work authorization, job preferences, compensation policy, disclosures, experience, projects, skills, awards/certifications, and sensitive-answer policies.
 ```
 
-After creating or editing these files, restart the backend so the stores and in-memory candidate data are reloaded.
+Restart the backend after editing ground-truth files.
+
+## Classifier Learning
+
+A new user should start without `data/ground_truth/classifier.pkl`. In that cold-start state, JobPilot uses:
+
+1. The user's `ground_truth.json` skills, desired roles, preferences, and experience to produce a first-pass heuristic score.
+2. `data/ground_truth/classifier_feedback.jsonl` to adjust future scores based on the user's reviewed examples.
+
+Existing users keep their training history. JobPilot reads both the legacy `data/classifier_feedback.jsonl` file and the newer `data/ground_truth/classifier_feedback.jsonl` file, then appends new reviews to the newer user-owned file. If an existing `data/classifier.pkl` model is present and no newer `data/ground_truth/classifier.pkl` exists, JobPilot also continues using that model. That means older feedback keeps influencing scores while new users, who have neither file yet, start fresh.
+
+Every classifier review stores a training signal immediately when the user clicks Approve or Fail:
+
+```json
+{"job_url":"...","label":"pass","score":0.71,"description_text":"...","created_at":"..."}
+```
+
+The label is the user's actual review decision. If the classifier says fail but the user approves it, that row is stored as `pass`. If the classifier says pass but the user rejects it, that row is stored as `fail`.
+
+The scorer reads the feedback file every time it scores a later job, so new review clicks are available to the classifier during the same run. As the file grows, similar future jobs are nudged toward the user's preferences. Keep `classifier_feedback.jsonl` if you want the classifier to keep learning. Delete it only when you intentionally want to reset a user's learned preferences. Do not commit it to GitHub.
+
+Important settings:
+
+```env
+CLASSIFIER_THRESHOLD=0.65
+CLASSIFIER_AUTO_PASS=0
+```
+
+Keep `CLASSIFIER_AUTO_PASS=0` while training a new user. That forces human review and creates better feedback. Once the user has enough reviewed examples, enabling auto-pass is safer.
+
+## Configuration
+
+Create `.env` in the repository root as needed:
+
+```env
+JOBPILOT_HOST=127.0.0.1
+JOBPILOT_PORT=8765
+JOBPILOT_GROUND_TRUTH_DIR=data/ground_truth
+
+DRY_RUN=1
+AUTO_SUBMIT_WITHOUT_APPROVAL=0
+LIVE_MODE=0
+
+BROWSER_PERSISTENT=1
+BROWSER_USER_DATA_DIR=data/browser-profile
+BROWSER_STEALTH_LEVEL=2
+
+MONGO_URI=
+MONGO_DB=jobpilot
+
+GENERATOR_DISABLED=1
+CLASSIFIER_THRESHOLD=0.65
+CLASSIFIER_AUTO_PASS=0
+
+GROQ_API_KEY=
+GEMINI_API_KEY=
+CEREBRAS_API_KEY=
+MISTRAL_API_KEY=
+OPENROUTER_API_KEY=
+```
+
+Notes:
+
+- `DRY_RUN=1` fills forms and stops before final submit.
+- `DRY_RUN=0` enables real-submit behavior.
+- `AUTO_SUBMIT_WITHOUT_APPROVAL=0` requires final review before a real final submit.
+- `LIVE_MODE=1` opens a visible browser so the user can watch and take over.
+- `GENERATOR_DISABLED=1` keeps MLX generation disabled. Cloud/provider keys or local MLX setup are needed for richer generation.
+- `JOBPILOT_GROUND_TRUTH_DIR` can point to another private folder, but `data/ground_truth` is the expected default.
 
 ## Running The Backend
 
 ```bash
 source .venv/bin/activate
-uvicorn backend.main:app --host 127.0.0.1 --port 8765 --reload
+uv run uvicorn backend.main:app --host 127.0.0.1 --port 8765 --reload
 ```
 
 Useful endpoints:
 
 - `GET /status`
+- `GET /settings`
+- `GET /ground_truth`
+- `PUT /ground_truth`
 - `POST /run/start`
 - `POST /run/stop`
 - `GET /applications`
-- `DELETE /applications?job_url=...`
 - `GET /runs`
 - `GET /stream`
 
 ## Running The macOS App
 
-Open `menubar-app/JobPilot.xcodeproj` in Xcode and run the `JobPilot` target. The app talks to the backend on `127.0.0.1:8765` by default, or `JOBPILOT_BACKEND_PORT` if set.
+Open:
 
-The menu-bar UI can:
+```text
+menubar-app/JobPilot.xcodeproj
+```
+
+Run the `JobPilot` target in Xcode. The app connects to the backend on `127.0.0.1:8765` by default.
+
+The menu-bar app can:
 
 - Start and stop runs.
-- Toggle Dry Run / Real Submit.
+- Toggle Dry Run and Real Submit.
 - Toggle final-review behavior.
 - Focus or open the automation browser.
-- Answer approval, unknown field, and manual takeover prompts.
-- View History, logs, runs, analytics, and stored applications.
+- Answer classifier, approval, unknown-field, and manual-takeover prompts.
+- View History, logs, analytics, runs, and stored applications.
 
 ## Running A Job Search
 
 1. Start the backend.
 2. Start the menu-bar app.
-3. Paste a careers or open-roles URL. A list page works best; a single-job URL is mainly useful for forced retries from History.
+3. Paste a careers page, ATS search page, or supported job listing URL.
 4. Choose a limit.
-5. Keep Dry Run enabled for first passes.
-6. Start the run and respond to approvals or manual takeover prompts.
+5. Keep Dry Run enabled for the first pass.
+6. Review classifier decisions so the user-specific classifier learns.
+7. Respond to unknown fields, CAPTCHA, login, and final-review prompts.
 
-The orchestrator processes each listing through listing extraction, liveness checks, deduplication, classification, document generation, form filling, validation, and finalization.
+The orchestrator processes listings through scraping, liveness checks, deduplication, classifier review, resume/cover-letter generation, form filling, validation, and finalization.
 
-## History Semantics
+## Safety Behavior
 
-History has two sections:
+Dry Run:
 
-- Dry Runs
-- Real Submits
+- Fills the application form.
+- Audits required fields, including browser-required and asterisk-marked fields.
+- Attempts to fill missing required fields.
+- Asks the user when a required answer cannot be safely inferred.
+- Stops before the final submit click.
 
-Each section has its own outcome fields in SQLite:
+Real Submit:
 
-- `dry_run_outcome`, `dry_run_completed_at`, `dry_run_error`
-- `real_submit_outcome`, `real_submit_completed_at`, `real_submit_error`
+- Requires live submit mode.
+- Requires final approval unless explicitly disabled.
+- Clicks submit only after validation.
+- Confirms the browser did not flag missing or invalid fields.
+- Does not mark the job successful while validation errors remain.
 
-Green means the attempt succeeded in that mode and has no mode-specific error. Red means incomplete, blocked, failed, or requiring attention. Green entries are locked in the same mode. Red entries expose retry actions.
+CAPTCHA:
 
-## Manual Intervention
+- On first detection, JobPilot attempts one safe continue/retry.
+- If CAPTCHA appears again or persists, it prompts: `CAPTCHA detected — Human intervention required.`
 
-JobPilot asks for help when it cannot safely continue, including:
+History:
 
-- CAPTCHA or robot detection after the automatic one-time retry.
-- Login, SSO, MFA, or expired sessions.
-- Unknown required form fields.
-- Browser validation errors that remain after automatic filling.
-- Missing submit/next button selectors.
-- Unsupported application flows.
+- The History panel has separate Dry Run and Real Submit sections.
+- A green Dry Run entry cannot be run again as Dry Run.
+- A green Real Submit entry cannot be run again as Real Submit.
+- Red entries remain actionable.
 
-When you complete the required action in the browser, choose continue in the menu-bar prompt.
+## Tech Stack
 
-## Data And Artifacts
+| Layer | Repo location | Tech | How it is used |
+| --- | --- | --- | --- |
+| Backend API | `backend/main.py`, `backend/api/*`, `backend/config.py` | FastAPI, Uvicorn, Pydantic, python-dotenv, structlog | Starts the runtime, validates settings, exposes REST/stream endpoints, and wires stores, browser, model routing, classifier, and gates. |
+| Orchestration | `backend/orchestrator.py`, `backend/conductor.py`, `backend/retry.py` | asyncio, Tenacity | Runs each job through extraction, liveness, fit review, document generation, form fill, validation, history, and artifact cleanup. |
+| Browser automation | `backend/scraping/browser.py`, `backend/scraping/adapters/*`, `backend/form/*` | Playwright, playwright-stealth, RapidFuzz | Opens Chromium, scrapes job lists, detects apply buttons, fills fields, handles next/submit buttons, and pauses for manual takeover. |
+| HTML/text extraction | `backend/scraping/job_page.py`, `backend/specialists/jd_cleaner.py` | BeautifulSoup4, Trafilatura | Turns noisy job pages into readable job descriptions. |
+| Embeddings | `backend/models/encoder.py` | sentence-transformers, NumPy | Encodes job descriptions, profile facts, labels, projects, and bullets for semantic matching. |
+| Classifier | `backend/models/classifier.py`, `backend/models/classifier_feedback.py` | scikit-learn artifact support, NumPy, JSONL feedback | Scores fit from the user's ground truth, starts cold without a model file, and learns from review feedback. |
+| LLM routing | `backend/llm/router.py`, `backend/llm/providers.py`, `backend/models/generator.py` | MLX, Groq, Gemini, Cerebras, Mistral, OpenRouter | Routes generation locally or to configured cloud providers while respecting privacy and schema needs. |
+| Form answering | `backend/form/field_answerer.py`, `backend/form/answerer.py`, `backend/storage/learned_answers.py` | Ground-truth JSON/YAML, SQLite learned answers, translation cache | Answers structured fields from user facts, reuses learned answers, and asks the user when needed. |
+| Resume and cover letters | `backend/resume/*`, `backend/cover_letter/*`, `templates/*` | Jinja2, LaTeX | Builds job-specific resume/cover contexts and compiles PDFs. |
+| Storage | `backend/storage/*`, `data/*` | SQLite, optional MongoDB, JSON, YAML, JSONL | Stores history, runs, applications, pending actions, learned answers, button memory, profile files, and classifier feedback. |
+| Alerts/manual gates | `backend/alarm/*` | pyobjc, AppKit | Sends native macOS attention prompts for approvals, classifier review, CAPTCHA, login, validation, and manual takeover. |
+| macOS app | `menubar-app/JobPilot/*` | Swift, SwiftUI, AppKit, Combine | Provides menu-bar controls, settings, history, prompts, logs, and backend communication. |
+| Tests/tooling | `pyproject.toml`, `uv.lock`, `tests/*` | pytest, pytest-asyncio, httpx, hypothesis, TexSoup | Pins dependencies and validates backend, form, history, scraping, and setup behavior. |
 
-Local state lives under `data/`:
+## Models And Artifacts
 
-- `data/jobpilot.db` stores runs, applications, pending actions, learned answers, and history.
-- `data/browser-profile/` stores the persistent Chromium profile.
-- `data/logs/` stores backend logs used by the menu-bar console.
-- `data/outputs/` stores run artifacts when retained.
+| Model/artifact | Where | Purpose |
+| --- | --- | --- |
+| `BAAI/bge-small-en-v1.5` | `backend/models/encoder.py` | Main embedding model for semantic matching and feedback similarity. Falls back to deterministic hashing if unavailable. |
+| `data/ground_truth/classifier_feedback.jsonl` | `backend/models/classifier_feedback.py` | User-specific training log appended after classifier reviews. |
+| `data/ground_truth/classifier.pkl` | `backend/models/classifier.py` | Optional trained classifier. Fresh users should usually start without it. |
+| `mlx-community/Qwen2.5-14B-Instruct-4bit` | `backend/models/generator.py` | Optional local generator when `GENERATOR_DISABLED=0`. |
+| `mlx-community/Qwen2.5-1.5B-Instruct-4bit` | `backend/llm/router.py` | Local tiny routing target for short completions. |
+| `mlx-community/Qwen2.5-3B-Instruct-4bit` | `backend/llm/router.py` | Local JSON/schema-friendly routing target. |
+| `mlx-community/Qwen2.5-7B-Instruct-4bit` | `backend/llm/router.py` | Local reasoning routing target. |
+| `llama-3.1-8b-instant` | `backend/llm/router.py` | Groq fast cloud target. |
+| `llama-3.3-70b-versatile` | `backend/llm/router.py` | Groq stronger cloud fallback target. |
+| `gemini-2.5-flash` | `backend/llm/router.py` | Gemini structured-output fallback target. |
 
-Generated artifacts may include resume PDFs, cover-letter PDFs, screenshots, HTML snapshots, pre-submit audits, ATS score JSON, and failure bundles.
+Cloud clients are only created when corresponding API keys are present.
+
+## Data And Privacy
+
+Private local data:
+
+- `data/ground_truth/`
+- `data/jobpilot.db`
+- `data/browser-profile/`
+- `data/logs/`
+- `data/outputs/`
+- `data/platform-sessions/`
+
+These should stay local. Push source code, tests, templates, and documentation to GitHub, not personal profile data or browser/session state.
 
 ## Development
 
-Run the focused test suite:
+Run all tests:
 
 ```bash
-pytest
+uv run pytest
 ```
 
-Run a specific test file:
+Run focused tests:
 
 ```bash
-pytest tests/test_history_modes.py
+uv run pytest tests/test_ground_truth_setup.py tests/test_history_modes.py
 ```
 
-Before changing form automation, prefer adding tests around:
+Useful checks after automation changes:
 
-- required-field audits,
-- validation retry behavior,
-- per-mode history persistence,
-- CAPTCHA/manual takeover escalation,
-- adapter field enumeration.
+```bash
+uv run python -m compileall backend
+```
+
+When changing browser or form automation, add focused tests around apply-button detection, required-field audits, validation retry behavior, per-mode history persistence, CAPTCHA/manual takeover escalation, and adapter field enumeration.
 
 ## Limitations
 
-JobPilot cannot solve CAPTCHA challenges for you. It only retries once in case the page has a transient or skippable CAPTCHA-like interstitial, then asks for human help.
+JobPilot cannot solve CAPTCHA challenges. It only retries once for transient/skippable CAPTCHA-like states, then asks for human help.
 
-Job boards change frequently. Selectors and adapters may need updates for specific ATS platforms.
-
-Real Submit should be used carefully. Keep Dry Run enabled until you have inspected the generated answers, documents, and final form state for the target site.
+Job boards and ATS platforms change frequently. Selectors and adapters may need updates for specific sites.

@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import structlog
 
-from backend.config import DATA_DIR
+from backend.config import DATA_DIR, GROUND_TRUTH_DIR
 from backend.specialists.base import SpecialistContext
 from backend.specialists.form_freetext import FormFreeTextSpecialist
 from backend.specialists.translator import Translator
@@ -24,7 +24,6 @@ log = structlog.get_logger()
 
 YES_VARIANTS = ["yes", "y", "true", "1", "absolutely", "correct", "affirmative", "i am", "i do", "i have", "i will"]
 NO_VARIANTS = ["no", "n", "false", "0", "no i am not", "i do not", "i am not", "i have not", "i will not"]
-INDIA_DIAL_CODE = "+91"
 DEGREE_KEYWORDS = {
     "bachelor": ["bachelor", "b.s.", "b.a.", "bs", "ba", "undergraduate", "4-year"],
     "master": ["master", "m.s.", "m.a.", "ms", "ma", "graduate", "postgraduate"],
@@ -67,6 +66,9 @@ FIELD_LOOKUP_TABLE: dict[tuple[str, ...], Any] = {
     ("linkedin", "linkedin profile", "linkedin url", "linkedin link"): "candidate.personal.linkedin_url",
     ("github", "github profile", "github url"): "candidate.personal.github_url",
     ("portfolio", "personal website", "personal site", "website url"): "candidate.personal.portfolio_url",
+    # "Other links" fields (Workable and others) expect one URL — use the portfolio/website
+    # URL, since LinkedIn and GitHub have their own dedicated fields on those forms.
+    ("other links", "other link", "additional links", "additional link", "other websites", "other urls", "other url"): "candidate.personal.portfolio_url",
     ("address", "street address", "home address"): "candidate.personal.address",
     ("city",): "candidate.personal.city",
     ("state", "province", "region"): "candidate.personal.state",
@@ -227,12 +229,46 @@ def _match_original_options(intended: str, original_options: list[str], lookup_o
     return _match_original_option(intended, original_options, lookup_options)
 
 
-def _phone_country_code_answer(normalized_label: str, options: list[str]) -> str | None:
-    if "country" not in normalized_label or not options:
+PHONE_COUNTRY_CODE_TERMS = ("phone", "telephone", "mobile", "cell", "tel", "dial", "calling")
+
+DIAL_CODES_BY_COUNTRY = {
+    "india": "+91",
+    "in": "+91",
+    "united states": "+1",
+    "united states of america": "+1",
+    "usa": "+1",
+    "us": "+1",
+    "canada": "+1",
+    "united arab emirates": "+971",
+    "uae": "+971",
+    "united kingdom": "+44",
+    "uk": "+44",
+    "great britain": "+44",
+    "singapore": "+65",
+    "germany": "+49",
+    "france": "+33",
+    "netherlands": "+31",
+    "australia": "+61",
+}
+
+
+def _phone_country_code_answer(normalized_label: str, options: list[str], candidate_data: dict[str, Any]) -> str | None:
+    if not _looks_like_phone_country_code_label(normalized_label):
         return None
-    if not _looks_like_country_code_options(options):
+    dial_code = _candidate_dial_code(candidate_data, options)
+    if not dial_code:
         return None
-    return _match_dial_code_option(INDIA_DIAL_CODE, options)
+    if options:
+        if not _looks_like_country_code_options(options):
+            return None
+        return _match_dial_code_option(dial_code, options)
+    return dial_code
+
+
+def _looks_like_phone_country_code_label(normalized_label: str) -> bool:
+    if "country" not in normalized_label:
+        return False
+    return any(term in normalized_label for term in PHONE_COUNTRY_CODE_TERMS)
 
 
 def _looks_like_country_code_options(options: list[str]) -> bool:
@@ -246,6 +282,45 @@ def _match_dial_code_option(dial_code: str, options: list[str]) -> str:
         if pattern.search(str(option)):
             return option
     return dial_code
+
+
+def _candidate_dial_code(candidate_data: dict[str, Any], options: list[str]) -> str | None:
+    personal = candidate_data.get("candidate", {}).get("personal", {})
+    phone = str(personal.get("phone", "") or "")
+    country_code = _dial_code_for_country(
+        str(personal.get("country") or personal.get("location_country") or personal.get("citizenship") or "")
+    )
+    if country_code:
+        return country_code
+    if not phone.startswith("+"):
+        return None
+    phone_digits = re.sub(r"\D+", "", phone)
+    if not phone_digits:
+        return None
+    option_codes = sorted(
+        {
+            match.group(1)
+            for option in options
+            for match in re.finditer(r"\+\s*(\d{1,4})\b", str(option))
+        },
+        key=len,
+        reverse=True,
+    )
+    for code in option_codes:
+        if phone_digits.startswith(code):
+            return f"+{code}"
+    known_codes = sorted({code.lstrip("+") for code in DIAL_CODES_BY_COUNTRY.values()}, key=len, reverse=True)
+    for code in known_codes:
+        if phone_digits.startswith(code):
+            return f"+{code}"
+    return None
+
+
+def _dial_code_for_country(country: str) -> str | None:
+    normalized = re.sub(r"\s+", " ", country).strip().lower()
+    if not normalized:
+        return None
+    return DIAL_CODES_BY_COUNTRY.get(normalized)
 
 
 def _levenshtein_distance(s1: str, s2: str) -> int:
@@ -530,7 +605,7 @@ async def get_answer_for_field_with_metadata(
             "translator": translator.translator_name,
         }
     normalized_label = normalize_label(lookup_label)
-    phone_country_code_answer = _phone_country_code_answer(normalized_label, lookup_options)
+    phone_country_code_answer = _phone_country_code_answer(normalized_label, lookup_options, candidate_data)
     if phone_country_code_answer is not None:
         return AnswerResult(answer=phone_country_code_answer, tier=1)
     learned_answers_enabled = bool(job_context.get("enable_learned_answers"))
@@ -708,7 +783,7 @@ def build_candidate_data(ground_truth: dict[str, Any], candidate_profile: dict[s
         },
         "preferences": {
             "notice_period": profile_job_preferences.get("notice_period") or ground_truth.get("preferences", {}).get("notice_period_days", "Immediately"),
-            "expected_salary": compensation.get("india", {}).get("target_amount") or compensation.get("foreign", {}).get("rounded_answer", ""),
+            "expected_salary": _expected_salary(compensation, ground_truth.get("preferences", {})),
             "current_salary": "",
             "how_did_you_hear": "Company website",
             "remote_preference": ",".join(profile_job_preferences.get("locations", {}).get("modes", [])),
@@ -776,12 +851,76 @@ def _education_gpa(item: dict[str, Any]) -> str:
 
 
 def _requires_sponsorship(work_auth: dict[str, Any]) -> bool:
-    sponsorship = work_auth.get("sponsorship", {}) if isinstance(work_auth, dict) else {}
-    india = sponsorship.get("india", {})
-    if india.get("now_requires") is False:
+    """Return True if sponsorship is needed for non-authorized-country applications.
+
+    When the profile explicitly lists authorized_countries (e.g. only India), we
+    use the default_outside_* policy as the global baseline, since most applications
+    will be to non-authorized countries.  When no authorized_countries are listed
+    we fall back to the original per-country check so that existing profiles
+    (e.g. US citizens with US policy = no sponsorship) continue to work.
+    """
+    if not isinstance(work_auth, dict):
         return False
-    outside = sponsorship.get("default_outside_india", {})
-    return bool(outside.get("now_requires", False))
+    sponsorship = work_auth.get("sponsorship", {})
+    if not isinstance(sponsorship, dict) or not sponsorship:
+        return False
+    authorized_countries = work_auth.get("authorized_countries")
+    # When an explicit authorized-country list is present, the candidate is
+    # restricted to those countries and needs the default policy for everywhere else.
+    if isinstance(authorized_countries, list) and authorized_countries:
+        default_policy = (
+            sponsorship.get("default_outside_authorized_countries")
+            or sponsorship.get("default_outside_india")
+            or sponsorship.get("default")
+        )
+        if isinstance(default_policy, dict):
+            return bool(default_policy.get("now_requires", False))
+    # No authorized_countries key: fall back to original behaviour — if any
+    # explicitly-named country says no sponsorship required, trust that.
+    for country_key, policy in sponsorship.items():
+        if str(country_key).startswith("default_") or not isinstance(policy, dict):
+            continue
+        if policy.get("now_requires") is False:
+            return False
+    default_policy = (
+        sponsorship.get("default_outside_authorized_countries")
+        or sponsorship.get("default_outside_india")
+        or sponsorship.get("default")
+        or {}
+    )
+    return bool(default_policy.get("now_requires", False)) if isinstance(default_policy, dict) else False
+
+
+def _expected_salary(compensation: dict[str, Any], preferences: dict[str, Any]) -> str:
+    if not isinstance(compensation, dict):
+        compensation = {}
+    if not isinstance(preferences, dict):
+        preferences = {}
+    target = compensation.get("target_salary")
+    if isinstance(target, dict):
+        amount = target.get("amount")
+        currency = target.get("currency")
+        if amount is not None:
+            return " ".join(str(part) for part in (amount, currency) if part)
+    for key in ("expected_salary", "minimum_salary", "target_amount", "rounded_answer"):
+        value = compensation.get(key)
+        if value not in (None, ""):
+            return str(value)
+    for value in compensation.values():
+        if not isinstance(value, dict):
+            continue
+        for key in ("expected_salary", "minimum_salary", "target_amount", "rounded_answer"):
+            nested = value.get(key)
+            if nested not in (None, ""):
+                currency = value.get("currency")
+                return " ".join(str(part) for part in (nested, currency) if part)
+    usd = preferences.get("salary_min_usd_annual")
+    if usd not in (None, ""):
+        return f"{usd} USD"
+    inr = preferences.get("salary_expected_inr_lpa")
+    if inr not in (None, ""):
+        return f"{inr} LPA"
+    return ""
 
 
 def _handle_custom_question(normalized_label: str, field_type: str, field_options: list[str], job_context: dict, candidate_data: dict[str, Any]) -> str | None:
@@ -916,7 +1055,7 @@ def _pattern_matches_label(pattern: str, normalized_label: str) -> bool:
 
 
 def _load_projects_library_safe() -> list[dict[str, Any]]:
-    path = DATA_DIR / "projects_library.json"
+    path = _user_file_path("projects_library.json")
     if not path.exists():
         log.warning("projects_library_not_built", path=str(path))
         return []
@@ -933,6 +1072,14 @@ def _load_projects_library_safe() -> list[dict[str, Any]]:
         log.warning("projects_library_projects_not_list", path=str(path))
         return []
     return [project for project in projects if isinstance(project, dict)]
+
+
+def _user_file_path(name: str) -> Any:
+    canonical = GROUND_TRUTH_DIR / name
+    legacy = DATA_DIR / name
+    if canonical.exists() or not legacy.exists():
+        return canonical
+    return legacy
 
 
 def _select_relevant_projects(candidate_data: dict[str, Any], job_description: str, limit: int = 3) -> list[dict[str, Any]]:

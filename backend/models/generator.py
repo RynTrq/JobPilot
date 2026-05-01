@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from backend.config import DATA_DIR, GENERATOR_DISABLED, MODEL_REQUEST_TIMEOUT_SECONDS, MODEL_WORKERS
+from backend.config import DATA_DIR, GENERATOR_DISABLED, GROUND_TRUTH_DIR, MODEL_REQUEST_TIMEOUT_SECONDS, MODEL_WORKERS
 from backend.contracts import LlmRequest, PrivacyLevel, SpecialistName
 from backend.llm.router import ModelRouter
 
@@ -373,7 +373,7 @@ class Generator:
 
 
 def load_defaults() -> dict[str, Any]:
-    path = DATA_DIR / "defaults.json"
+    path = _user_file_path("defaults.json")
     if not path.exists():
         return {
             "grounded_answer": {"answer_text": "UNKNOWN", "source_keys_used": [], "confidence_0_to_1": 0.0, "unknown_flag": True, "fallback_reason": "defaults_missing"},
@@ -383,6 +383,14 @@ def load_defaults() -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+
+
+def _user_file_path(name: str) -> Any:
+    canonical = GROUND_TRUTH_DIR / name
+    legacy = DATA_DIR / name
+    if canonical.exists() or not legacy.exists():
+        return canonical
+    return legacy
 
 
 def _strip_code_fence(text: str) -> str:

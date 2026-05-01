@@ -23,13 +23,13 @@ FIELD_ENUM_SCRIPT = r"""
 
   function visible(el) {
     if (!el || !el.isConnected) return false;
+    if (el.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
     const style = window.getComputedStyle(el);
     const rect = el.getBoundingClientRect();
     return style.visibility !== 'hidden'
       && style.display !== 'none'
       && rect.width > 0
-      && rect.height > 0
-      && !el.closest('[aria-hidden="true"]');
+      && rect.height > 0;
   }
 
   function text(el) {
@@ -705,13 +705,14 @@ class BrowserFormAdapter(GenericAdapter):
                 r"""
                 () => {
                 const visible = (el) => {
+                  if (!el || !el.isConnected) return false;
+                  if (el.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
                   const style = window.getComputedStyle(el);
                   const rect = el.getBoundingClientRect();
                   return style.visibility !== 'hidden'
                     && style.display !== 'none'
                     && rect.width > 0
-                    && rect.height > 0
-                    && !el.closest('[aria-hidden="true"]');
+                    && rect.height > 0;
                 };
                 const visibleFields = Array.from(document.querySelectorAll(
                   'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="combobox"], [role="listbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="spinbutton"], [data-automation-id], [data-testid*="field"], [data-testid*="input"]'
@@ -765,7 +766,10 @@ class BrowserFormAdapter(GenericAdapter):
                     raw_fields,
                     allow_large_generic_forms=not require_application_markers,
                 )
+                non_application_widget = self._raw_fields_look_like_non_application_widget(raw_fields)
                 search_filter_like = self._raw_fields_look_like_search_filter(raw_fields)
+                if non_application_widget:
+                    continue
                 if any(field.get("label_text") or field.get("name") for field in raw_fields) and (
                     application_like or (not require_application_markers and not search_filter_like)
                 ):
@@ -786,6 +790,8 @@ class BrowserFormAdapter(GenericAdapter):
             and field.get("visible", True)
         ]
         if not fields:
+            return False
+        if self._raw_fields_look_like_non_application_widget(fields):
             return False
         labels = " ".join(
             " ".join(
@@ -814,6 +820,67 @@ class BrowserFormAdapter(GenericAdapter):
             return False
         return allow_large_generic_forms and len(fields) >= 4
 
+    def _raw_fields_look_like_non_application_widget(self, raw_fields: list[dict]) -> bool:
+        fields = [
+            field
+            for field in raw_fields
+            if (field.get("label_text") or field.get("name"))
+            and field.get("enabled", True)
+            and field.get("visible", True)
+        ]
+        if not fields:
+            return False
+        field_texts = [
+            " ".join(
+                str(field.get(key) or "")
+                for key in ("label_text", "name", "placeholder", "aria_label", "element_id")
+            ).lower()
+            for field in fields
+        ]
+        combined = " ".join(field_texts)
+        strong_application_markers = (
+            "address line",
+            "cover letter",
+            "current company",
+            "current title",
+            "cv",
+            "first name",
+            "full name",
+            "github",
+            "last name",
+            "legal name",
+            "linkedin",
+            "mailing address",
+            "mobile",
+            "phone",
+            "portfolio",
+            "resume",
+            "right to work",
+            "street address",
+            "sponsor",
+            "surname",
+            "visa",
+            "work authorization",
+            "website",
+        )
+        if any(marker in combined for marker in strong_application_markers):
+            return False
+        widget_markers = (
+            "alert",
+            "ask anything",
+            "chat",
+            "chatbot",
+            "job alert",
+            "manage alerts",
+            "notified",
+            "notification",
+            "recommendation",
+            "similar jobs",
+            "subscribe",
+        )
+        matched = sum(1 for text in field_texts if any(marker in text for marker in widget_markers))
+        return matched >= max(1, len(fields) - 1)
+
     def _raw_fields_look_like_search_filter(self, raw_fields: list[dict]) -> bool:
         fields = [
             field
@@ -824,6 +891,8 @@ class BrowserFormAdapter(GenericAdapter):
         ]
         if not fields:
             return False
+        if self._raw_fields_look_like_non_application_widget(fields):
+            return True
         field_texts = [
             " ".join(
                 str(field.get(key) or "")
@@ -896,6 +965,8 @@ class BrowserFormAdapter(GenericAdapter):
                 () => {
                   const text = document.body?.innerText?.toLowerCase() || '';
                   const fields = Array.from(document.querySelectorAll('input')).filter((el) => {
+                    if (!el || !el.isConnected) return false;
+                    if (el.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
                     const style = window.getComputedStyle(el);
                     const rect = el.getBoundingClientRect();
                     return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;

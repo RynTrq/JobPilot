@@ -35,6 +35,9 @@ final class AppState: ObservableObject {
     @Published var backendConsoleLogs: BackendConsoleLogs = BackendConsoleLogs()
     @Published var consoleError: String?
     @Published var backendPort: Int = BackendClient.defaultPort
+    /// Set when an SSE error event with error_code "adapter_not_found" fires.
+    /// Cleared on each new run start. Drives the Unknown Adapter banner in MenuBarView.
+    @Published var unknownAdapterSite: String? = nil
     /// The escalating multi-channel alarm. Owns sound, speech, notifications, dock bounce.
     /// State is forwarded through `alarmIsRinging` / `alarmLevel` for SwiftUI binding.
     let alarmManager = AlarmManager()
@@ -165,6 +168,7 @@ final class AppState: ObservableObject {
     func start() async {
         guard !careerURL.isEmpty else { return }
         normalizeDailyLimit()
+        unknownAdapterSite = nil
         do {
             try await waitForBackend()
             _ = try await backend.start(careerURL: careerURL, limit: runLimit)
@@ -235,6 +239,23 @@ final class AppState: ObservableObject {
             await scheduleDashboardRefresh(force: true)
         } catch {
             recordEvent(title: "Could not remove from history", detail: shortError(error), level: .error)
+        }
+    }
+
+    func deleteApplicationsByCompany(_ companies: Set<String>) async {
+        guard !companies.isEmpty else { return }
+        let list = Array(companies)
+        do {
+            try await backend.deleteApplicationsByCompany(companies: list)
+            allApplications.removeAll { list.contains($0.displayCompany) }
+            activity.removeAll { list.contains($0.company ?? "") }
+            if let sel = selectedApplication, list.contains(sel.displayCompany) {
+                selectedApplication = nil
+            }
+            recordEvent(title: "Removed \(list.count) company/companies from history", detail: list.joined(separator: ", "), level: .info)
+            await scheduleDashboardRefresh(force: true)
+        } catch {
+            recordEvent(title: "Could not remove companies from history", detail: shortError(error), level: .error)
         }
     }
 
@@ -443,6 +464,18 @@ final class AppState: ObservableObject {
         stopAlarm()
     }
 
+    func skipAlarmField() async {
+        guard let alarm else { return }
+        try? await backend.skipField(question: alarm.question)
+        recordEvent(title: "Skipped field (always skip)", detail: alarm.question, level: .warning)
+        self.alarm = nil
+        self.alarmAnswer = ""
+        self.alarmPending = false
+        self.alarmField = ""
+        self.showAlarmWindow = false
+        stopAlarm()
+    }
+
     func openAlarm() {
         guard alarm != nil else { return }
         showAlarmWindow = true
@@ -585,6 +618,9 @@ final class AppState: ObservableObject {
             await scheduleDashboardRefresh(force: type == "dry_run_complete" || type == "needs_attention" || type == "limit_hit")
         } else if event.name == "applied" || event.name == "error" {
             lastEventText = event.name
+            if event.name == "error", event.data["error_code"] as? String == "adapter_not_found" {
+                unknownAdapterSite = careerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
             await scheduleDashboardRefresh(force: true)
         }
     }
@@ -721,8 +757,13 @@ final class AppState: ObservableObject {
                     ?? "The URL didn't return any job listings. Make sure it's a careers page, not a single job posting."
             }
         case "error":
-            title = "Backend error"
-            detail = event.data["message"] as? String
+            if event.data["error_code"] as? String == "adapter_not_found" {
+                title = "No adapter found"
+                detail = event.data["message"] as? String ?? event.data["recovery_hint"] as? String
+            } else {
+                title = "Backend error"
+                detail = event.data["message"] as? String
+            }
             level = .error
         default:
             title = event.name

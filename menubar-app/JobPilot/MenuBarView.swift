@@ -13,6 +13,9 @@ struct MenuBarView: View {
                     if !state.backendReachable {
                         backendUnreachableBanner
                     }
+                    if state.unknownAdapterSite != nil {
+                        unknownAdapterBanner
+                    }
                     controlPanel
                     pendingActions
                     runSummary
@@ -116,6 +119,34 @@ struct MenuBarView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color.red.opacity(0.35), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var unknownAdapterBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "puzzlepiece.extension")
+                .font(.title3)
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("**Unknown adapter** — site not supported")
+                    .font(.subheadline)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("JobPilot doesn't have a dedicated adapter for this URL. Try pasting the ATS board URL directly (e.g. a Greenhouse, Lever, or Workable link).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Dismiss") { state.unknownAdapterSite = nil }
+                    .font(.caption)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
@@ -685,9 +716,9 @@ struct HistoryWindow: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var showClearHistoryConfirmation = false
-    /// Which mode the History window is currently showing. Mirrors the
-    /// segmented picker in the Console window — exactly the same control,
-    /// flipping between two filtered views of the same dataset.
+    @State private var showDeleteCompaniesConfirmation = false
+    @State private var selectingCompanies = false
+    @State private var selectedCompanies: Set<String> = []
     @State private var selectedMode: HistorySectionMode = .dryRun
 
     var body: some View {
@@ -699,20 +730,26 @@ struct HistoryWindow: View {
                 Button("Refresh") {
                     Task { await state.refresh() }
                 }
-                Button("Clear History", role: .destructive) {
-                    showClearHistoryConfirmation = true
+                Button(selectingCompanies ? "Cancel" : "Select Companies") {
+                    selectingCompanies.toggle()
+                    if !selectingCompanies { selectedCompanies.removeAll() }
                 }
-                .confirmationDialog(
-                    "Clear all JobPilot history?",
-                    isPresented: $showClearHistoryConfirmation,
-                    titleVisibility: .visible
-                ) {
+                if !selectingCompanies {
                     Button("Clear History", role: .destructive) {
-                        Task { await state.clearHistory() }
+                        showClearHistoryConfirmation = true
                     }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text("This removes applications, runs, events, and pending actions. Profile data and templates are not deleted.")
+                    .confirmationDialog(
+                        "Clear all JobPilot history?",
+                        isPresented: $showClearHistoryConfirmation,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Clear History", role: .destructive) {
+                            Task { await state.clearHistory() }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("This removes applications, runs, events, and pending actions. Profile data and templates are not deleted.")
+                    }
                 }
                 Button("Close") {
                     dismiss()
@@ -720,15 +757,54 @@ struct HistoryWindow: View {
                 .keyboardShortcut(.cancelAction)
             }
 
+            if selectingCompanies {
+                HStack(spacing: 8) {
+                    Button("Select All") {
+                        selectedCompanies = Set(groupedByCompany.map(\.company))
+                    }
+                    .font(.caption)
+                    Button("Deselect All") {
+                        selectedCompanies.removeAll()
+                    }
+                    .font(.caption)
+                    Spacer()
+                    if !selectedCompanies.isEmpty {
+                        Text("\(selectedCompanies.count) selected")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Delete Selected", role: .destructive) {
+                            showDeleteCompaniesConfirmation = true
+                        }
+                        .font(.caption)
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .confirmationDialog(
+                            "Delete \(selectedCompanies.count) company/companies from history?",
+                            isPresented: $showDeleteCompaniesConfirmation,
+                            titleVisibility: .visible
+                        ) {
+                            Button("Delete", role: .destructive) {
+                                let toDelete = selectedCompanies
+                                Task {
+                                    await state.deleteApplicationsByCompany(toDelete)
+                                    selectedCompanies.removeAll()
+                                    selectingCompanies = false
+                                }
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("All jobs from these companies will be removed from history.")
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
             HStack {
                 TextField("Search company, role, URL, or location", text: $query)
                     .textFieldStyle(.roundedBorder)
             }
 
-            // Segmented picker: same shape as the Console's Backend / API tabs.
-            // Switching tabs filters the data set; rows are coloured by the
-            // per-mode outcome so the user sees what's red and what's green
-            // exclusively for that mode.
             Picker("", selection: $selectedMode) {
                 Text("Dry Runs").tag(HistorySectionMode.dryRun)
                 Text("Real Submits").tag(HistorySectionMode.realSubmit)
@@ -736,28 +812,13 @@ struct HistoryWindow: View {
             .pickerStyle(.segmented)
 
             HStack(spacing: 8) {
-                StatusPill(
-                    text: "\(activeSection.count) Roles",
-                    color: .blue
-                )
-                StatusPill(
-                    text: "\(greenCount) Green",
-                    color: .green
-                )
-                StatusPill(
-                    text: "\(redCount) Red",
-                    color: .red
-                )
-                StatusPill(
-                    text: "\(groupedByCompany.count) Companies",
-                    color: .gray
-                )
+                StatusPill(text: "\(activeSection.count) Roles", color: .blue)
+                StatusPill(text: "\(greenCount) Green", color: .green)
+                StatusPill(text: "\(redCount) Red", color: .red)
+                StatusPill(text: "\(groupedByCompany.count) Companies", color: .gray)
                 Spacer()
             }
 
-            // Company-grouped list. Tap a company row to expand its open jobs;
-            // mirrors the original "click company → see roles" affordance the
-            // user remembered from before, but scoped to the current mode tab.
             List {
                 if groupedByCompany.isEmpty {
                     Text(emptyStateMessage)
@@ -765,13 +826,18 @@ struct HistoryWindow: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(groupedByCompany, id: \.company) { group in
-                        DisclosureGroup {
-                            ForEach(group.items) { item in
-                                HistoryRoleRow(item: item, mode: selectedMode)
-                                    .environmentObject(state)
-                            }
-                        } label: {
+                        if selectingCompanies {
                             HStack(spacing: 8) {
+                                Toggle(isOn: Binding(
+                                    get: { selectedCompanies.contains(group.company) },
+                                    set: { on in
+                                        if on { selectedCompanies.insert(group.company) }
+                                        else { selectedCompanies.remove(group.company) }
+                                    }
+                                )) {
+                                    EmptyView()
+                                }
+                                .toggleStyle(.checkbox)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(group.company)
                                         .font(.caption)
@@ -786,6 +852,40 @@ struct HistoryWindow: View {
                                 }
                                 if group.redCount > 0 {
                                     StatusPill(text: "\(group.redCount) Red", color: .red)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if selectedCompanies.contains(group.company) {
+                                    selectedCompanies.remove(group.company)
+                                } else {
+                                    selectedCompanies.insert(group.company)
+                                }
+                            }
+                        } else {
+                            DisclosureGroup {
+                                ForEach(group.items) { item in
+                                    HistoryRoleRow(item: item, mode: selectedMode)
+                                        .environmentObject(state)
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(group.company)
+                                            .font(.caption)
+                                            .bold()
+                                        Text("\(group.items.count) role\(group.items.count == 1 ? "" : "s")")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    if group.greenCount > 0 {
+                                        StatusPill(text: "\(group.greenCount) Green", color: .green)
+                                    }
+                                    if group.redCount > 0 {
+                                        StatusPill(text: "\(group.redCount) Red", color: .red)
+                                    }
                                 }
                             }
                         }

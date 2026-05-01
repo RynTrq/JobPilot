@@ -6,11 +6,14 @@ import shutil
 
 from pydantic import BaseModel, HttpUrl
 from fastapi import APIRouter, HTTPException, Request
+import structlog
 from backend import config
 from backend.config import ANALYTICS_LOOKBACK_DAYS, DATA_DIR, OUTPUT_DIR
+from backend.models.classifier_feedback import ClassifierFeedbackStore
 from backend.storage.learned_answers import list_pending_questions, resolve_pending_question
 
 router = APIRouter()
+log = structlog.get_logger()
 
 
 class StartRunRequest(BaseModel):
@@ -33,6 +36,10 @@ class StopRunResponse(BaseModel):
 class GapFillRequest(BaseModel):
     question: str
     answer: str
+
+
+class GapSkipRequest(BaseModel):
+    question: str
 
 
 class ApprovalRequest(BaseModel):
@@ -227,6 +234,18 @@ async def delete_application(job_url: str, request: Request) -> dict:
     return {"ok": True}
 
 
+class DeleteByCompanyRequest(BaseModel):
+    companies: list[str]
+
+
+@router.delete("/applications/by-company")
+async def delete_applications_by_company(body: DeleteByCompanyRequest, request: Request) -> dict:
+    if not body.companies:
+        raise HTTPException(status_code=400, detail="No companies specified")
+    deleted = request.app.state.sqlite.delete_applications_by_company(body.companies)
+    return {"ok": True, "deleted": deleted}
+
+
 @router.post("/history/clear")
 async def clear_history(request: Request) -> dict:
     counts = request.app.state.sqlite.clear_history()
@@ -366,6 +385,29 @@ async def fill_gap(body: GapFillRequest, request: Request) -> dict[str, bool]:
     return {"ok": ok}
 
 
+@router.post("/gap/skip")
+async def skip_gap(body: GapSkipRequest, request: Request) -> dict[str, bool]:
+    """Mark a field question as always-skip and dismiss the current alarm for it."""
+    ok = request.app.state.alarm.skip(body.question)
+    return {"ok": ok}
+
+
+@router.get("/gap/skipped")
+async def list_skipped_gaps(request: Request) -> dict:
+    """List all field labels the user has marked as always-skip."""
+    store = request.app.state.sqlite
+    return {"skipped": store.list_skipped_questions()}
+
+
+@router.delete("/gap/skipped/{label}")
+async def delete_skipped_gap(label: str, request: Request) -> dict[str, bool]:
+    """Un-skip a previously skipped field label."""
+    from urllib.parse import unquote
+    store = request.app.state.sqlite
+    ok = store.delete_skipped_question(unquote(label).strip().lower())
+    return {"ok": ok}
+
+
 @router.post("/gap/read_browser")
 async def gap_read_browser(body: GapReadRequest, request: Request) -> dict:
     """Read whatever the user just typed into the focused field in the live browser
@@ -393,8 +435,65 @@ async def approval_respond(body: ApprovalRequest, request: Request) -> dict[str,
 
 @router.post("/classifier/respond")
 async def classifier_respond(body: ClassifierReviewRequest, request: Request) -> dict[str, bool]:
-    ok = request.app.state.classifier_review.respond(body.token, body.passed, body.decision_payload)
+    feedback_recorded = _record_classifier_review_feedback(
+        request=request,
+        token=body.token,
+        passed=body.passed,
+        decision_payload=body.decision_payload,
+    )
+    ok = request.app.state.classifier_review.respond(
+        body.token,
+        body.passed,
+        body.decision_payload,
+        feedback_recorded=feedback_recorded,
+    )
     return {"ok": ok}
+
+
+def _record_classifier_review_feedback(
+    *,
+    request: Request,
+    token: str,
+    passed: bool,
+    decision_payload: dict | None,
+) -> bool:
+    try:
+        pending = request.app.state.classifier_review.pending.get(token)
+        if pending is None:
+            return False
+        details = pending.details
+        review_payload = decision_payload or details.get("fit_decision") or {}
+        if not isinstance(review_payload, dict):
+            review_payload = {}
+        description = str(details.get("description_text") or details.get("description_preview") or "")
+        if not description.strip():
+            return False
+        score = float(details.get("classifier_score") or 0.0)
+        sut_decision = str(details.get("classifier_threshold_decision") or "")
+        rule_b = review_payload.get("rule_b") if isinstance(review_payload.get("rule_b"), dict) else {}
+        matched = rule_b.get("matched_expertise_area")
+        ClassifierFeedbackStore().append_agent_signal(
+            job_url=str(details.get("job_url") or ""),
+            jd_text=description,
+            candidate_facts={
+                "experience_years_professional_product": review_payload.get("experience_years_professional_product"),
+                "missing_structured_fields": review_payload.get("missing_structured_fields", []),
+                "fact_sources": review_payload.get("fact_sources", {}),
+            },
+            agent_decision=str(review_payload.get("submission_outcome") or ("pass" if passed else "fail")),
+            agent_reasoning=review_payload,
+            sut_score=score,
+            sut_decision=sut_decision,
+            title=details.get("title"),
+            company=details.get("company"),
+            regions_matched=[str(matched)] if matched else [],
+            jd_min_years=review_payload.get("jd_min_years"),
+            review_label="pass" if passed else "fail",
+        )
+        return True
+    except Exception as exc:
+        log.warning("classifier_review_feedback_append_failed", token=token, error=str(exc))
+        return False
 
 
 @router.post("/manual/respond")

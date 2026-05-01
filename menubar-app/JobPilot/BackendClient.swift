@@ -195,6 +195,15 @@ actor BackendClient {
         try Self.validate(response: response, data: data)
     }
 
+    func deleteApplicationsByCompany(companies: [String]) async throws {
+        var request = URLRequest(url: baseURL.appendingPathComponent("applications/by-company"))
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["companies": companies])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Self.validate(response: response, data: data)
+    }
+
     func clearHistory() async throws {
         var request = URLRequest(url: baseURL.appendingPathComponent("history/clear"))
         request.httpMethod = "POST"
@@ -262,6 +271,15 @@ actor BackendClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["question": question, "answer": answer])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Self.validate(response: response, data: data)
+    }
+
+    func skipField(question: String) async throws {
+        var request = URLRequest(url: baseURL.appendingPathComponent("gap/skip"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["question": question])
         let (data, response) = try await URLSession.shared.data(for: request)
         try Self.validate(response: response, data: data)
     }

@@ -180,10 +180,19 @@ class ClassifierReviewGate(_BaseGate):
         reason = details.get("reason", "Classifier review needed").strip()
         return f"JobPilot alert. {reason}. Please continue in the browser."
 
-    def respond(self, token: str, passed: bool, decision_payload: dict[str, Any] | None = None) -> bool:
+    def respond(
+        self,
+        token: str,
+        passed: bool,
+        decision_payload: dict[str, Any] | None = None,
+        *,
+        feedback_recorded: bool = False,
+    ) -> bool:
         payload: dict[str, Any] = {"passed": passed}
         if decision_payload:
             payload["decision_payload"] = decision_payload
+        if feedback_recorded:
+            payload["feedback_recorded"] = True
         return self._respond(token, payload)
 
 

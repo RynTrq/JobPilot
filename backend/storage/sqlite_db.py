@@ -164,6 +164,11 @@ CREATE TABLE IF NOT EXISTS schema_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS skipped_questions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label_normalized TEXT UNIQUE NOT NULL,
+  created_at TEXT NOT NULL
+);
 """
 
 
@@ -621,6 +626,16 @@ class SQLiteStore:
             self.conn.commit()
             return app_cur.rowcount > 0 or cur.rowcount > 0
 
+    def delete_applications_by_company(self, companies: list[str]) -> int:
+        if not companies:
+            return 0
+        placeholders = ",".join("?" * len(companies))
+        with self._lock:
+            self.conn.execute(f"DELETE FROM listing_runs WHERE job_url IN (SELECT job_url FROM applications WHERE company IN ({placeholders}))", companies)
+            cur = self.conn.execute(f"DELETE FROM applications WHERE company IN ({placeholders})", companies)
+            self.conn.commit()
+            return cur.rowcount
+
     def clear_history(self) -> dict[str, int]:
         tables = (
             "applications",
@@ -904,6 +919,37 @@ class SQLiteStore:
             "follow_up_queue": follow_up_queue,
             "recommendations": recommendations,
         }
+
+    def upsert_skipped_question(self, label_normalized: str, timestamp: str) -> None:
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT INTO skipped_questions(label_normalized, created_at)
+                VALUES (?, ?)
+                ON CONFLICT(label_normalized) DO NOTHING
+                """,
+                (label_normalized, timestamp),
+            )
+            self.conn.commit()
+
+    def is_question_skipped(self, label_normalized: str) -> bool:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT 1 FROM skipped_questions WHERE label_normalized=? LIMIT 1",
+                (label_normalized,),
+            ).fetchone()
+        return row is not None
+
+    def list_skipped_questions(self) -> list[dict]:
+        with self._lock:
+            rows = self.conn.execute("SELECT * FROM skipped_questions ORDER BY created_at DESC").fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_skipped_question(self, label_normalized: str) -> bool:
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM skipped_questions WHERE label_normalized=?", (label_normalized,))
+            self.conn.commit()
+            return bool(cur.rowcount)
 
     def upsert_learned_answer(self, label_normalized: str, classification: str, answer: str, timestamp: str) -> None:
         with self._lock:

@@ -13,6 +13,7 @@ load_dotenv()
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
+GROUND_TRUTH_DIR = Path(os.getenv("JOBPILOT_GROUND_TRUTH_DIR", str(DATA_DIR / "ground_truth")))
 OUTPUT_DIR = DATA_DIR / "outputs"
 TEMPLATE_DIR = ROOT_DIR / "templates"
 
@@ -259,6 +260,7 @@ def browser_user_data_dir() -> Path:
 
 def validate_config() -> dict[str, Any]:
     payload = BOUNDS.model_dump()
+    payload["ground_truth_dir"] = str(GROUND_TRUTH_DIR)
     payload["runtime"] = runtime_settings_payload()
     return payload
 

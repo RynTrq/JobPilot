@@ -16,6 +16,10 @@ import structlog
 log = structlog.get_logger()
 
 
+def _normalize_label(label: str) -> str:
+    return (label or "").strip().lower()
+
+
 @dataclass
 class PendingAlarm:
     token: str
@@ -66,6 +70,10 @@ class AlarmNotifier:
         if self._deferred_questions_mode_enabled():
             self._store_deferred_question(question, field_type, options, context)
             return None
+        # Auto-skip fields the user has previously marked as "always skip".
+        if self.store and self.store.is_question_skipped(_normalize_label(question)):
+            log.info("alarm_auto_skipped", question=question[:80])
+            return None
         self.pending = PendingAlarm(token, question, details, future)
         self._beep()
         self._start_voice_alarm(question)
@@ -114,6 +122,22 @@ class AlarmNotifier:
             self.pending.future.set_result(answer)
         if self.store:
             self.store.clear_pending_action(self.pending.token)
+        return True
+
+    def skip(self, question: str) -> bool:
+        """Resolve the pending alarm with None (skip the field) and persist the skip so
+        the same question is auto-skipped in all future runs."""
+        if not self.pending or self.pending.question != question:
+            return False
+        if self.store:
+            self.store.upsert_skipped_question(
+                _normalize_label(question),
+                datetime.now(timezone.utc).isoformat(),
+            )
+            self.store.clear_pending_action(self.pending.token)
+        if not self.pending.future.done():
+            self.pending.future.set_result(None)
+        log.info("alarm_field_skipped_and_remembered", question=question[:80])
         return True
 
     async def read_from_browser(self) -> str | None:

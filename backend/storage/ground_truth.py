@@ -12,10 +12,12 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.config import DATA_DIR
+from backend.config import DATA_DIR, GROUND_TRUTH_DIR
 
-GROUND_TRUTH_PATH = DATA_DIR / "ground_truth.json"
-BULLET_LIBRARY_PATH = DATA_DIR / "bullet_library.json"
+GROUND_TRUTH_PATH = GROUND_TRUTH_DIR / "ground_truth.json"
+BULLET_LIBRARY_PATH = GROUND_TRUTH_DIR / "bullet_library.json"
+LEGACY_GROUND_TRUTH_PATH = DATA_DIR / "ground_truth.json"
+LEGACY_BULLET_LIBRARY_PATH = DATA_DIR / "bullet_library.json"
 MONTH_YEAR_RE = re.compile(r"^\d{4}-\d{2}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -124,10 +126,10 @@ class GroundTruth(StrictModel):
     def load(cls, path: Path | None = None) -> Self:
         """Load and validate ground truth from disk."""
 
-        target = path or GROUND_TRUTH_PATH
+        target = resolve_ground_truth_path(path)
         if not target.exists():
             raise FileNotFoundError(
-                f"Ground truth file not found at {target}. Run `python scripts/seed_ground_truth.py` first."
+                f"Ground truth file not found at {target}. Create data/ground_truth/ground_truth.json first."
             )
         data = json.loads(target.read_text(encoding="utf-8"))
         return cls.model_validate(data)
@@ -159,7 +161,7 @@ class GroundTruthStore:
     """Compatibility wrapper used by the rest of the backend."""
 
     def __init__(self, path: Path | None = None):
-        self.path = path or GROUND_TRUTH_PATH
+        self.path = path
 
     def _get_mongo(self):
         from backend.config import MONGO_URI, MONGO_DB
@@ -192,7 +194,8 @@ class GroundTruthStore:
                     return doc
             except Exception:
                 pass
-        if not self.path.exists():
+        path = resolve_ground_truth_path(self.path)
+        if not path.exists():
             return {}
         return self.read()
 
@@ -222,6 +225,26 @@ def normalize_question(question: str) -> str:
     return collapsed[:120]
 
 
+def resolve_ground_truth_path(path: Path | None = None) -> Path:
+    """Return the canonical ground-truth file, falling back to the legacy root file."""
+
+    if path is not None:
+        return path
+    if GROUND_TRUTH_PATH.exists() or not LEGACY_GROUND_TRUTH_PATH.exists():
+        return GROUND_TRUTH_PATH
+    return LEGACY_GROUND_TRUTH_PATH
+
+
+def resolve_bullet_library_path(path: Path | None = None) -> Path:
+    """Return the canonical bullet library, falling back to the legacy root file."""
+
+    if path is not None:
+        return path
+    if BULLET_LIBRARY_PATH.exists() or not LEGACY_BULLET_LIBRARY_PATH.exists():
+        return BULLET_LIBRARY_PATH
+    return LEGACY_BULLET_LIBRARY_PATH
+
+
 def validate_month_year(value: str) -> str:
     """Validate a YYYY-MM string."""
 
@@ -243,20 +266,20 @@ def empty_ground_truth() -> GroundTruth:
 
     return GroundTruth(
         personal=Personal(
-            full_name="Md Raiyaan Tarique",
-            preferred_name="Raiyaan",
-            email="trqynzzz@gmail.com",
-            phone_e164="+918799733317",
-            location_city="New Delhi",
-            location_state="Ghaffar Manzil Lane 1",
-            location_country="India",
-            citizenship="Indian",
-            work_auth_us="I am not authorized to work in the US",
-            work_auth_eu="I am not authorized to work in the EU",
-            linkedin_url="https://www.linkedin.com/in/md-raiyaan-tarique-548956313/",
-            github_url="https://github.com/RynTrq",
-            portfolio_url="https://ryntrq.vercel.app",
-            pronouns="he/him",
+            full_name="",
+            preferred_name="",
+            email="",
+            phone_e164="",
+            location_city="",
+            location_state=None,
+            location_country="",
+            citizenship="",
+            work_auth_us="",
+            work_auth_eu="",
+            linkedin_url="",
+            github_url="",
+            portfolio_url="",
+            pronouns="Prefer not to say",
         ),
         education=[],
         experience=[],
@@ -326,7 +349,7 @@ def write_bullet_library_seed(
 ) -> Path:
     """Persist a seed bullet library."""
 
-    target = path or BULLET_LIBRARY_PATH
+    target = resolve_bullet_library_path(path) if path is not None else BULLET_LIBRARY_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         json.dumps(build_bullet_library_seed(ground_truth), indent=2) + "\n",

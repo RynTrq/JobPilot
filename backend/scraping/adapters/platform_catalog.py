@@ -275,6 +275,7 @@ PLATFORM_CONFIGS: tuple[PlatformConfig, ...] = (
         "Global",
         "ats",
         ("workable.com",),
+        listing_selectors=(*DEFAULT_LISTING_SELECTORS, "a[href*='/j/']"),
         direct_path_markers=(*DEFAULT_DIRECT_PATH_MARKERS, "/j/"),
     ),
     cfg("personio", "Personio", "Global", "ats", ("personio.de",), auth_required=True),

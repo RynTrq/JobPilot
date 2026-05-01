@@ -25,6 +25,7 @@ from backend.form.navigator import (
     detect_page_type,
     find_next_button,
     find_submit_button,
+    wait_for_post_submit_confirmation,
 )
 from backend.cover_letter.assembler import CoverLetterAssembler
 from backend.cover_letter.compiler import compile_latex as compile_cover_latex
@@ -60,6 +61,9 @@ NOISE_FIELD_KEYWORDS = (
     "robots only",
     "do not enter if you're human",
     "honeypot",
+    "autofill",
+    "import resume",
+    "import from",
 )
 
 
@@ -101,6 +105,47 @@ class FormFiller:
             "job_url": job_url,
             **extra,
         }
+
+    async def _emit_progress(
+        self,
+        stage: str,
+        message: str,
+        *,
+        outcome: str = "in_progress",
+        job_url: str | None = None,
+        **extra: Any,
+    ) -> None:
+        """Publish a fine-grained ``stage_progress`` event to the live UI.
+
+        The JobPilot menubar app subscribes to this stream and surfaces
+        ``stage`` / ``message`` so the user sees exactly where we are in the
+        fill→audit→submit sequence (e.g. "Filling field 4/12: Email" or
+        "Waiting for Cloudflare Turnstile to verify").  Use this from the
+        filler whenever a step takes more than ~50 ms — the UI should never
+        be silent for long enough that the user wonders if we're stuck.
+        """
+        # Mirror orchestrator._stage so the stage updates the orchestrator's
+        # ``current_stage`` / ``current_stage_message`` text on the dashboard.
+        orch = getattr(self.app_state, "orch", None)
+        orch_state = getattr(orch, "state", None) if orch is not None else None
+        if orch_state is not None:
+            orch_state.current_stage = stage
+            orch_state.current_stage_message = message
+        log.info("filler_stage_progress", stage=stage, message=message, **extra)
+        try:
+            await self.app_state.stream.publish(
+                "progress",
+                self._event_envelope(
+                    "stage_progress",
+                    stage=stage,
+                    message=message,
+                    outcome=outcome,
+                    job_url=job_url,
+                    **extra,
+                ),
+            )
+        except Exception as exc:
+            log.debug("filler_stage_progress_publish_failed", stage=stage, error=str(exc))
 
     async def _compile_document(self, compile_fn, tex_path: Path, out_dir: Path, *, stage: str) -> str:
         attempts = max(2, config.MAX_RETRY_BUDGET)
@@ -184,6 +229,11 @@ class FormFiller:
             all_filled_fields = _merge_field_answers(all_filled_fields, page_answers)
             outcome.field_answers = all_filled_fields
 
+            # Workable/Turnstile: CAPTCHA widget renders lazily at bottom of form.
+            # Guard runs again after field filling so it catches CAPTCHA that
+            # was invisible at the top of the loop.
+            await self._guard_for_manual_takeover(form_page, job_context)
+
             next_button = await find_next_button(form_page)
             if next_button is not None:
                 validation_retry = 0
@@ -220,6 +270,20 @@ class FormFiller:
                 outcome.confirmation_detected = submit_result["confirmation_detected"]
                 outcome.pre_submit_audit = submit_result.get("pre_submit_audit")
                 break
+
+            # Check for a disabled submit button — usually means CAPTCHA is unsolved.
+            disabled_submit = await _find_disabled_submit_button(form_page)
+            if disabled_submit is not None:
+                log.warning("submit_button_disabled_captcha_likely", url=getattr(form_page, "url", ""))
+                no_nav_retries += 1
+                if no_nav_retries > max_no_nav_retries:
+                    raise NavigationError("Submit button remained disabled after repeated retries")
+                await self._manual_takeover(
+                    job_context, form_page,
+                    "Submit button is present but disabled — if you see a CAPTCHA (Cloudflare Turnstile) please solve it in the browser window, then press Continue.",
+                )
+                # After user intervenes, loop back and try again
+                continue
 
             log.error("no_next_or_submit_button_found", url=getattr(form_page, "url", ""))
             no_nav_retries += 1
@@ -274,7 +338,16 @@ class FormFiller:
         )
         page_fill_start = time.monotonic()
 
+        total_visible = sum(1 for f in ordered_fields if _normalized_field_type(f) != "hidden")
+        await self._emit_progress(
+            "filling_form",
+            f"Filling {total_visible} form field(s) one by one",
+            job_url=job_context.get("job_url"),
+            total_fields=total_visible,
+        )
+
         idx = 0
+        filled_so_far = 0
         while idx < len(ordered_fields):
             form_field = ordered_fields[idx]
             idx += 1
@@ -283,11 +356,29 @@ class FormFiller:
                 field_type = _normalized_field_type(form_field)
                 if field_type == "hidden":
                     continue
+                filled_so_far += 1
+                progress_label = (form_field.label_text or form_field.name or "field")[:60]
+                await self._emit_progress(
+                    "filling_field",
+                    f"Filling field {filled_so_far}/{total_visible}: {progress_label}",
+                    job_url=job_context.get("job_url"),
+                    field_label=progress_label,
+                    field_index=filled_so_far,
+                    total_fields=total_visible,
+                    field_type=field_type,
+                )
                 answer = await self._get_answer(form_field, job_context, candidate_data, outcome)
                 if answer is None and not _is_file_like_field(form_field):
                     unanswered.append({"field": form_field})
                     page_answers.append(_field_answer_record(form_field, ""))
                     continue
+                if _is_file_like_field(form_field) or field_type == "file":
+                    await self._emit_progress(
+                        "attaching_document",
+                        f"Attaching document to field: {progress_label}",
+                        job_url=job_context.get("job_url"),
+                        field_label=progress_label,
+                    )
                 final_value = await self._fill_single_field(page, adapter, form_field, answer, document_paths, page_answers, job_context)
                 answer_text = "" if final_value is None else str(final_value)
                 page_answers.append(_field_answer_record(form_field, answer_text))
@@ -506,9 +597,14 @@ class FormFiller:
                 if _is_custom_combobox_field(form_field):
                     await self._fill_field_by_type(page, form_field, expected)
                 else:
+                    # Reuse the hardened fill path so any React-controlled input
+                    # is force-cleared before re-typing the expected value.
+                    # Using fill("") + type() directly here (the previous
+                    # implementation) appends to React-managed inputs whose
+                    # value the framework restores between events, producing
+                    # concatenated URLs in the rendered field.
                     await _close_open_combobox_menus(page)
-                    await locator.fill("")
-                    await locator.type(expected, delay=25)
+                    await self._fill_text_like(locator, expected, delay_range=(20, 60))
 
     async def _guard_for_manual_takeover(self, page, job_context: dict[str, Any]) -> None:
         if await _captcha_detected(page):
@@ -570,11 +666,11 @@ class FormFiller:
         )
         if takeover.get("action") != "continue":
             raise RuntimeError(reason)
-        # If user registered a button name, store it for future use
+        # If user registered a button name, update the module-level singleton used by
+        # find_next_button / find_submit_button so the retry on this same run sees it.
         if takeover.get("registered_button"):
-            from backend.storage.button_memory import ButtonNameMemory
-            button_memory = ButtonNameMemory()
-            button_memory.register_button_name(
+            from backend.form.navigator import _button_memory
+            _button_memory.register_button_name(
                 takeover["registered_button"]["type"],
                 takeover["registered_button"]["name"],
                 domain,
@@ -740,18 +836,68 @@ class FormFiller:
             log.info("dry_run_submit_skipped", url=getattr(form_page, "url", ""))
             return {"submitted": False, "submit_error": None, "confirmation_detected": False, "pre_submit_audit": final_audit}
 
+        # Pre-submit gate.  This is the LAST guard before we click submit and
+        # the only place that enforces the user-facing contract:
+        #
+        #   "Submit only after the form is fully filled AND the resume is
+        #    attached AND any anti-bot challenge has been solved."
+        #
+        # The pre-submit audit above has already covered required-field DOM
+        # values; here we additionally:
+        #   (a) await any background document task that the orchestrator
+        #       launched in parallel with the field fill, so we never click
+        #       submit before the resume PDF is on disk;
+        #   (b) verify the file-input(s) actually carry attached files,
+        #       not just that we *intended* to attach them;
+        #   (c) wait for an anti-bot challenge (Cloudflare Turnstile) to
+        #       resolve, escalating to manual takeover when it doesn't.
+        _captcha_jctx = job_context or {"job_url": approval_details.get("job_url", "")}
+        await self._await_pending_document_tasks(document_paths or {}, _captcha_jctx.get("job_url"))
+        await self._verify_documents_attached(form_page, adapter, document_paths or {}, _captcha_jctx.get("job_url"))
+        await self._emit_progress(
+            "pre_submit_audit",
+            "Verifying every required field is filled and the resume is attached",
+            job_url=_captcha_jctx.get("job_url"),
+        )
+        # Pre-submit CAPTCHA check: Workable (and similar SPAs) show a Cloudflare
+        # Turnstile on the final page.  The widget must be solved before clicking
+        # Submit, otherwise the button goes to "Submitting…" indefinitely.
+        if await _captcha_detected(form_page):
+            log.warning("captcha_before_submit_manual_takeover", url=getattr(form_page, "url", ""))
+            await self._emit_progress(
+                "waiting_for_captcha",
+                "Cloudflare Turnstile detected — waiting for human verification before submitting",
+                outcome="waiting_for_user",
+                job_url=_captcha_jctx.get("job_url"),
+            )
+            await self._manual_takeover(
+                _captcha_jctx,
+                form_page,
+                "CAPTCHA (Cloudflare Turnstile) must be solved before submitting — please tick the 'Verify you are human' checkbox in the browser, then press Continue.",
+            )
         submit_button = await find_submit_button(form_page)
         if submit_button is None:
             raise NavigationError("Submit button not found on final page")
         await submit_button.scroll_into_view_if_needed()
         await asyncio.sleep(random.uniform(config.BROWSER_HUMAN_DELAY_MIN_SECONDS, config.BROWSER_HUMAN_DELAY_MAX_SECONDS))
+        await self._emit_progress(
+            "submitting",
+            "Clicking Submit — the form is filled and the resume is attached",
+            job_url=_captcha_jctx.get("job_url"),
+        )
         await submit_button.click()
-        try:
-            await form_page.wait_for_load_state("networkidle", timeout=20000)
-        except Exception as exc:
-            log.warning("submit_wait_networkidle_failed", url=getattr(form_page, "url", ""), error=str(exc))
+        # For React/SPA forms (e.g. Workable), the submit is async — the button
+        # shows "Submitting" and the page content changes client-side without a
+        # full navigation.  Poll for confirmation text first, fall back to
+        # networkidle if that fails.
+        confirmed = await wait_for_post_submit_confirmation(form_page, timeout_ms=12000)
+        if not confirmed:
+            try:
+                await form_page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception as exc:
+                log.warning("submit_wait_networkidle_failed", url=getattr(form_page, "url", ""), error=str(exc))
         page_type = await detect_page_type(form_page)
-        if page_type == "confirmation_page":
+        if page_type == "confirmation_page" or confirmed:
             return {"submitted": True, "submit_error": None, "confirmation_detected": True, "pre_submit_audit": audit}
         errors = await check_for_validation_errors(form_page)
         if errors:
@@ -783,11 +929,13 @@ class FormFiller:
                     await submit_button.scroll_into_view_if_needed()
                     await asyncio.sleep(random.uniform(config.BROWSER_HUMAN_DELAY_MIN_SECONDS, config.BROWSER_HUMAN_DELAY_MAX_SECONDS))
                     await submit_button.click()
-                    try:
-                        await form_page.wait_for_load_state("networkidle", timeout=20000)
-                    except Exception as exc:
-                        log.warning("submit_wait_networkidle_failed", url=getattr(form_page, "url", ""), error=str(exc))
-                    if await detect_page_type(form_page) == "confirmation_page":
+                    confirmed = await wait_for_post_submit_confirmation(form_page, timeout_ms=12000)
+                    if not confirmed:
+                        try:
+                            await form_page.wait_for_load_state("networkidle", timeout=10000)
+                        except Exception as exc:
+                            log.warning("submit_wait_networkidle_failed", url=getattr(form_page, "url", ""), error=str(exc))
+                    if await detect_page_type(form_page) == "confirmation_page" or confirmed:
                         return {"submitted": True, "submit_error": None, "confirmation_detected": True, "pre_submit_audit": retry_audit}
                     errors = await check_for_validation_errors(form_page)
             if errors:
@@ -796,6 +944,36 @@ class FormFiller:
                 message = "Submit blocked by validation errors: " + "; ".join(errors[:5])
                 log.warning("submit_validation_errors_detected", url=getattr(form_page, "url", ""), errors=errors)
                 return {"submitted": False, "submit_error": message, "confirmation_detected": False, "pre_submit_audit": retry_audit}
+        # CAPTCHA (e.g. Cloudflare Turnstile) blocks the submit without raising a
+        # validation error — the button shows "Submitting…" indefinitely.  Detect
+        # this case and hand off to the user to solve it; then retry once.
+        if await _captcha_detected(form_page):
+            log.warning("captcha_blocking_submit_manual_takeover", url=getattr(form_page, "url", ""))
+            await self._manual_takeover(
+                _captcha_jctx,
+                form_page,
+                "CAPTCHA (Cloudflare Turnstile) is blocking the final submit — please tick the 'Verify you are human' checkbox in the browser, then click Submit Application.",
+            )
+            # User may have already submitted manually during the takeover window.
+            # Check for confirmation BEFORE re-clicking to avoid double-submit.
+            confirmed = await wait_for_post_submit_confirmation(form_page, timeout_ms=2000)
+            if not confirmed:
+                confirmed = await detect_page_type(form_page) == "confirmation_page"
+            if not confirmed:
+                # Re-find and click the submit button only if not yet submitted.
+                submit_button = await find_submit_button(form_page)
+                if submit_button is not None and not await submit_button.is_disabled():
+                    await submit_button.scroll_into_view_if_needed()
+                    await asyncio.sleep(random.uniform(config.BROWSER_HUMAN_DELAY_MIN_SECONDS, config.BROWSER_HUMAN_DELAY_MAX_SECONDS))
+                    await submit_button.click()
+            confirmed = await wait_for_post_submit_confirmation(form_page, timeout_ms=20000)
+            if not confirmed:
+                try:
+                    await form_page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+            if await detect_page_type(form_page) == "confirmation_page" or confirmed:
+                return {"submitted": True, "submit_error": None, "confirmation_detected": True, "pre_submit_audit": audit}
         log.warning("submit_without_confirmation", url=getattr(form_page, "url", ""))
         return {"submitted": False, "submit_error": "submit_not_confirmed_manual_review_required", "confirmation_detected": False, "pre_submit_audit": audit}
 
@@ -900,10 +1078,15 @@ class FormFiller:
             await self._fill_text_like(locator, str(answer or ""), delay_range=(30, 80))
             return
         if field_type == "tel":
-            india_country_code_selected = await _phone_field_has_india_country_code(locator)
+            selected_country_code = await _selected_phone_country_code(locator, answer)
             await self._fill_text_like(
                 locator,
-                _format_phone_answer(answer, field.placeholder or "", local_number=india_country_code_selected),
+                _format_phone_answer(
+                    answer,
+                    field.placeholder or "",
+                    local_number=selected_country_code is not None,
+                    dial_code=selected_country_code,
+                ),
                 delay_range=(30, 80),
             )
             return
@@ -939,12 +1122,50 @@ class FormFiller:
                 return
         except Exception as exc:
             log.debug("field_fast_fill_failed", error=str(exc))
+        # Hard clear the input.  Some React-controlled inputs (Workable, Lever,
+        # Greenhouse) revert ``locator.fill('')`` on the next render because
+        # they ignore non-React-driven value mutations.  Use the native value
+        # setter so React's onChange observer sees an empty value, then verify
+        # via input_value() before typing — otherwise locator.type() would
+        # APPEND to a leftover URL and produce concatenated values like
+        # ``https://github.com/Xhttps://other.example/``.
         try:
             await locator.fill("")
         except Exception as exc:
             log.debug("field_clear_via_fill_failed", error=str(exc))
-            await locator.press("Control+a")
-            await locator.press("Delete")
+            try:
+                await locator.press("Control+a")
+                await locator.press("Delete")
+            except Exception:
+                pass
+        if not await _locator_contains_value(locator, ""):
+            try:
+                await locator.evaluate(
+                    """(el) => {
+                        if (!el) return;
+                        const proto = (el.tagName === 'TEXTAREA')
+                            ? window.HTMLTextAreaElement.prototype
+                            : window.HTMLInputElement.prototype;
+                        const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+                        if (setter && setter.set) {
+                            setter.set.call(el, '');
+                        } else if ('value' in el) {
+                            el.value = '';
+                        } else if (el.isContentEditable) {
+                            el.textContent = '';
+                        }
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }"""
+                )
+            except Exception as exc:
+                log.debug("field_native_setter_clear_failed", error=str(exc))
+            if not await _locator_contains_value(locator, ""):
+                try:
+                    await locator.press("Control+a")
+                    await locator.press("Delete")
+                except Exception as exc:
+                    log.debug("field_select_all_clear_failed", error=str(exc))
         delay = 0 if _interaction_delay_disabled() else random.randint(*delay_range)
         await locator.type(value, delay=delay)
 
@@ -1063,13 +1284,33 @@ class FormFiller:
                     await checkbox.uncheck(force=True)
             return
         if any(token in label for token in ("agree", "terms", "authorize", "consent", "acknowledge")):
-            if not await locator.is_checked():
-                await locator.click()
+            try:
+                already = await locator.is_checked()
+            except Exception:
+                already = False
+            if not already:
+                try:
+                    await locator.check(force=True)
+                except Exception:
+                    try:
+                        await locator.click(force=True)
+                    except Exception:
+                        await locator.evaluate("el => el.click()")
             return
-        if truthy and not await locator.is_checked():
-            await locator.click()
-        if not truthy and await locator.is_checked():
-            await locator.click()
+        try:
+            is_checked = await locator.is_checked()
+        except Exception:
+            is_checked = False
+        if truthy and not is_checked:
+            try:
+                await locator.check(force=True)
+            except Exception:
+                await locator.click(force=True)
+        if not truthy and is_checked:
+            try:
+                await locator.uncheck(force=True)
+            except Exception:
+                await locator.click(force=True)
 
     async def _fill_radio(self, page, field, answer: str) -> None:
         options = await _radio_group(page, field)
@@ -1087,7 +1328,117 @@ class FormFiller:
                 return
         raise RuntimeError(f"Radio option not found for answer: {answer}")
 
+    async def _await_pending_document_tasks(
+        self,
+        document_paths: dict[str, str | None],
+        job_url: str | None,
+    ) -> None:
+        """Block until the resume / cover-letter generation task launched by
+        the orchestrator finishes.
+
+        The orchestrator runs document generation in parallel with the field
+        fill so the UI feels responsive; this helper is the *barrier* that
+        prevents us from clicking Submit while that task is still in flight.
+        """
+        doc_task = document_paths.get("_doc_task")
+        if doc_task is None:
+            return
+        if doc_task.done():
+            return
+        await self._emit_progress(
+            "awaiting_documents",
+            "Form is filled — waiting for the resume to finish compiling",
+            outcome="in_progress",
+            job_url=job_url,
+        )
+        try:
+            await doc_task
+        except Exception as exc:
+            log.warning("submit_gate_doc_task_failed", error=str(exc))
+
+    async def _verify_documents_attached(
+        self,
+        form_page,
+        adapter,
+        document_paths: dict[str, str | None],
+        job_url: str | None,
+    ) -> None:
+        """If the form has a file-input, confirm a file is attached.
+
+        The user requirement is: "Submit only after the resume is attached".
+        We re-enumerate the form fields and inspect every file input.  When a
+        file input is required but no file is attached AND the resume PDF is
+        on disk, we attach it automatically; otherwise we escalate to manual
+        takeover so the user knows precisely why we're stuck.
+        """
+        try:
+            fields = await adapter.enumerate_fields(form_page)
+        except Exception as exc:
+            log.debug("submit_gate_enumerate_failed", error=str(exc))
+            return
+        fields, _ = _filter_application_fields(fields)
+        file_fields = [f for f in fields if _normalized_field_type(f) == "file" or _is_file_like_field(f)]
+        if not file_fields:
+            return
+
+        for field in file_fields:
+            label = (field.label_text or field.name or "file").lower()
+            selector = getattr(field, "selector", None)
+            if not selector:
+                continue
+            try:
+                attached = await form_page.locator(selector).first.evaluate(
+                    "(el) => !!(el && el.files && el.files.length > 0)"
+                )
+            except Exception as exc:
+                log.debug("submit_gate_attached_probe_failed", selector=selector, error=str(exc))
+                continue
+            if attached:
+                continue
+            # Decide which document this field expects so we can re-attach.
+            kind = "resume"
+            if any(token in label for token in ("cover", "letter", "motivation")):
+                kind = "cover_letter"
+            doc_path = document_paths.get(f"{kind}_path")
+            if not doc_path or not Path(doc_path).exists():
+                # The doc generation either failed or hasn't produced a file.
+                # Block submission with an actionable message.
+                await self._emit_progress(
+                    "submit_gate_blocked_no_document",
+                    f"Required {kind.replace('_', ' ')} is missing — cannot submit",
+                    outcome="blocked",
+                    error_code=f"missing_{kind}",
+                    job_url=job_url,
+                )
+                raise RuntimeError(
+                    f"submit_gate_blocked: required {kind.replace('_', ' ')} document is not attached"
+                )
+            try:
+                await self._emit_progress(
+                    "reattaching_document",
+                    f"Re-attaching {kind.replace('_', ' ')} before submit",
+                    job_url=job_url,
+                )
+                await self._set_file_input(form_page, field, doc_path)
+            except Exception as exc:
+                log.warning("submit_gate_reattach_failed", kind=kind, error=str(exc))
+                raise RuntimeError(
+                    f"submit_gate_blocked: failed to re-attach {kind.replace('_', ' ')} ({exc})"
+                )
+
     async def _ensure_resume_document(self, document_paths: dict[str, str | None], job_context: dict[str, Any]) -> str:
+        resume_path = document_paths.get("resume_path")
+        if resume_path and Path(resume_path).exists():
+            return resume_path
+        # Await concurrent doc-gen task launched by the orchestrator before
+        # falling back to an on-demand regeneration.
+        doc_task = document_paths.get("_doc_task")
+        if doc_task is not None and not doc_task.done():
+            log.info("resume_awaiting_background_doc_task")
+            try:
+                await doc_task
+            except Exception:
+                pass
         resume_path = document_paths.get("resume_path")
         if resume_path and Path(resume_path).exists():
             return resume_path
@@ -1114,6 +1465,16 @@ class FormFiller:
         return resume_path
 
     async def _ensure_cover_letter_document(self, document_paths: dict[str, str | None], job_context: dict[str, Any]) -> str:
+        cover_path = document_paths.get("cover_letter_path")
+        if cover_path and Path(cover_path).exists():
+            return cover_path
+        doc_task = document_paths.get("_doc_task")
+        if doc_task is not None and not doc_task.done():
+            log.info("cover_letter_awaiting_background_doc_task")
+            try:
+                await doc_task
+            except Exception:
+                pass
         cover_path = document_paths.get("cover_letter_path")
         if cover_path and Path(cover_path).exists():
             return cover_path
@@ -1238,14 +1599,17 @@ def _deterministic_field_answer_override(field: Any, candidate_data: dict[str, A
         )
     ).lower()
     options = [str(option) for option in (getattr(field, "options", None) or [])]
-    if "country" in field_text and (
-        "phone" in field_text
-        or "dial" in field_text
-        or "calling" in field_text
-        or _options_look_like_dial_codes(options)
-    ):
-        return _match_dial_code_option("+91", options)
+    if _looks_like_phone_country_code_field(field_text, options):
+        dial_code = _candidate_phone_dial_code(candidate_data, options)
+        return _match_dial_code_option(dial_code, options) if dial_code else None
     return None
+
+
+def _looks_like_phone_country_code_field(field_text: str, options: list[str]) -> bool:
+    if "country" not in field_text:
+        return False
+    phone_terms = ("phone", "telephone", "mobile", "cell", "tel", "dial", "calling")
+    return any(term in field_text for term in phone_terms) or _options_look_like_dial_codes(options)
 
 
 def _options_look_like_dial_codes(options: list[str]) -> bool:
@@ -1261,11 +1625,75 @@ def _match_dial_code_option(dial_code: str, options: list[str]) -> str:
     return dial_code
 
 
-def _format_phone_answer(answer: Any, placeholder: str, *, local_number: bool = False) -> str:
+def _candidate_phone_dial_code(candidate_data: dict[str, Any], options: list[str]) -> str | None:
+    personal = candidate_data.get("candidate", {}).get("personal", {})
+    phone = str(personal.get("phone", "") or "")
+    country_code = _dial_code_for_country(
+        str(personal.get("country") or personal.get("location_country") or personal.get("citizenship") or "")
+    )
+    if country_code:
+        return country_code
+    if not phone.startswith("+"):
+        return None
+    phone_digits = re.sub(r"\D+", "", phone)
+    option_codes = sorted(
+        {
+            match.group(1)
+            for option in options
+            for match in re.finditer(r"\+\s*(\d{1,4})\b", str(option))
+        },
+        key=len,
+        reverse=True,
+    )
+    for code in option_codes:
+        if phone_digits.startswith(code):
+            return f"+{code}"
+    known_codes = sorted({code.lstrip("+") for code in _DIAL_CODES_BY_COUNTRY.values()}, key=len, reverse=True)
+    for code in known_codes:
+        if phone_digits.startswith(code):
+            return f"+{code}"
+    return None
+
+
+_DIAL_CODES_BY_COUNTRY = {
+    "india": "+91",
+    "in": "+91",
+    "united states": "+1",
+    "united states of america": "+1",
+    "usa": "+1",
+    "us": "+1",
+    "canada": "+1",
+    "united arab emirates": "+971",
+    "uae": "+971",
+    "united kingdom": "+44",
+    "uk": "+44",
+    "great britain": "+44",
+    "singapore": "+65",
+    "germany": "+49",
+    "france": "+33",
+    "netherlands": "+31",
+    "australia": "+61",
+}
+
+
+def _dial_code_for_country(country: str) -> str | None:
+    normalized = re.sub(r"\s+", " ", country).strip().lower()
+    if not normalized:
+        return None
+    return _DIAL_CODES_BY_COUNTRY.get(normalized)
+
+
+def _format_phone_answer(answer: Any, placeholder: str, *, local_number: bool = False, dial_code: str | None = None) -> str:
     original = str(answer or "").strip()
     raw = re.sub(r"\D+", "", str(answer or ""))
-    if local_number and len(raw) >= 10:
-        return raw[-10:]
+    if local_number:
+        dial_digits = re.sub(r"\D+", "", dial_code or "")
+        if dial_digits and raw.startswith(dial_digits):
+            local = raw[len(dial_digits):]
+            if local:
+                return local
+        if len(raw) >= 10:
+            return raw[-10:]
     if not placeholder:
         return f"+{raw}" if original.startswith("+") and raw else (raw or original)
     if placeholder == "(###) ###-####" and len(raw) >= 10:
@@ -1277,13 +1705,21 @@ def _format_phone_answer(answer: Any, placeholder: str, *, local_number: bool = 
     return original
 
 
-async def _phone_field_has_india_country_code(locator) -> bool:
+async def _selected_phone_country_code(locator, answer: Any) -> str | None:
+    phone_digits = re.sub(r"\D+", "", str(answer or ""))
+    if not phone_digits:
+        return None
     try:
-        return bool(
-            await locator.evaluate(
-                """(el) => {
+        result = await locator.evaluate(
+            """(el, phoneDigits) => {
                     const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
-                    const hasIndiaCode = (value) => /(^|[^\\d])\\+\\s*91\\b/.test(clean(value));
+                    const matchingCode = (value) => {
+                        const codes = Array.from(clean(value).matchAll(/\\+\\s*(\\d{1,4})\\b/g))
+                            .map((match) => match[1])
+                            .filter((code) => phoneDigits.startsWith(code))
+                            .sort((a, b) => b.length - a.length);
+                        return codes[0] || null;
+                    };
                     const hasAnyDialCode = (value) => /\\+\\s*\\d{1,4}\\b/.test(clean(value));
                     const controlText = (control) => {
                         const selectedOption = control.matches('select')
@@ -1295,38 +1731,78 @@ async def _phone_field_has_india_country_code(locator) -> bool:
                     let node = el;
                     for (let depth = 0; depth < 5 && node; depth += 1, node = node.parentElement) {
                         const text = clean(node.innerText || node.textContent || '');
-                        if (/\\bcountry\\b/i.test(text) && /\\bphone\\b/i.test(text) && hasIndiaCode(text)) {
-                            return true;
+                        const code = matchingCode(text);
+                        if (/\\bcountry\\b/i.test(text) && /\\bphone\\b/i.test(text) && code) {
+                            return `+${code}`;
                         }
                     }
                     const form = el.closest('form');
-                    if (!form) return false;
+                    if (!form) return null;
                     const phoneBox = el.getBoundingClientRect();
                     const controls = Array.from(form.querySelectorAll('[role="combobox"], select, [aria-haspopup="listbox"]'));
-                    return controls.some((control) => {
+                    for (const control of controls) {
                         const rect = control.getBoundingClientRect();
-                        if (rect.width === 0 || rect.height === 0) return false;
-                        if (rect.bottom < phoneBox.top - 160 || rect.top > phoneBox.bottom + 80) return false;
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        if (rect.bottom < phoneBox.top - 160 || rect.top > phoneBox.bottom + 80) continue;
                         const wrapper = control.closest('label, fieldset, section, div');
                         const text = clean(`${wrapper && (wrapper.innerText || wrapper.textContent) || ''} ${controlText(control)}`);
-                        return /\\bcountry\\b/i.test(text) && hasIndiaCode(text) && hasAnyDialCode(text);
-                    });
-                }"""
-            )
+                        const code = matchingCode(text);
+                        if (/\\bcountry\\b/i.test(text) && code && hasAnyDialCode(text)) {
+                            return `+${code}`;
+                        }
+                    }
+                    return null;
+                }""",
+            phone_digits,
         )
+        return str(result) if result else None
     except Exception as exc:
         log.debug("phone_country_code_detection_failed", error=str(exc))
-        return False
+        return None
+
+
+async def _find_disabled_submit_button(page):
+    """Return the first disabled submit-like button, or None. Used to detect
+    CAPTCHA-disabled submit on Workable and similar SPAs."""
+    from backend.form.navigator import SUBMIT_BUTTON_SELECTORS, _element_text, _element_visible
+    _SUBMIT_KEYWORDS = (
+        "submit application", "submit", "apply now", "apply", "send application",
+        "complete application",
+    )
+    for selector in SUBMIT_BUTTON_SELECTORS + ["button", "[role='button']"]:
+        try:
+            elements = await page.query_selector_all(selector)
+        except Exception:
+            continue
+        for element in elements:
+            try:
+                if not await element.is_visible():
+                    continue
+                if not await element.is_disabled():
+                    continue
+                text = (await _element_text(element)).lower()
+                if any(kw in text for kw in _SUBMIT_KEYWORDS):
+                    return element
+            except Exception:
+                continue
+    return None
 
 
 async def _captcha_detected(page) -> bool:
-    selectors = [
+    visible_selectors = [
         "iframe[src*='recaptcha']",
         "iframe[src*='hcaptcha']",
         "iframe[src*='cloudflare']",
+        "iframe[src*='challenges.cloudflare.com']",
+        # Cloudflare Turnstile — widget container and hidden response field
+        ".cf-turnstile",
+        "[class*='cf-turnstile']",
+        "[data-sitekey]",
+        "input[name='cf-turnstile-response']",
+        "[id*='cf-chl']",
         "[class*='captcha']",
     ]
-    for selector in selectors:
+    for selector in visible_selectors:
         try:
             element = await page.query_selector(selector)
             if element is not None and await element.is_visible():
@@ -1334,6 +1810,32 @@ async def _captcha_detected(page) -> bool:
         except Exception as exc:
             log.debug("captcha_detection_selector_failed", selector=selector, error=str(exc))
             continue
+
+    # Cloudflare Turnstile in *managed* mode (the configuration used by
+    # apply.workable.com) renders the widget invisibly when the underlying
+    # bot-management challenge passes silently.  The widget container stays
+    # in the DOM either way, but the hidden ``cf-turnstile-response`` input
+    # only carries a token when verification succeeded.  When the widget is
+    # present without a token, treat the page as gated by a CAPTCHA so the
+    # filler escalates to manual takeover instead of clicking a submit
+    # button that will silently fail with "Something went wrong".
+    try:
+        widget_present_no_token = await page.evaluate(
+            """() => {
+                const widget = document.querySelector(
+                    "[data-sitekey], .cf-turnstile, [class*='cf-turnstile']"
+                );
+                if (!widget) return false;
+                const tokenInput = document.querySelector("input[name='cf-turnstile-response']");
+                const token = tokenInput ? tokenInput.value : '';
+                return !token;
+            }"""
+        )
+        if widget_present_no_token:
+            return True
+    except Exception as exc:
+        log.debug("captcha_turnstile_token_probe_failed", error=str(exc))
+
     return False
 
 

@@ -30,7 +30,7 @@ from backend.resume.builder import ResumeContextBuilder
 from backend.resume.compiler import compile_latex
 from backend.resume.ats_scorer import score_resume_pdf
 from backend.resume.form_detector import resume_requested
-from backend.scraping.adapters import dispatch_adapter
+from backend.scraping.adapters import NoAdapterFoundError, dispatch_adapter
 from backend.specialists.fit_decision import (
     assess_parsing_coverage,
     decide_fit,
@@ -38,10 +38,15 @@ from backend.specialists.fit_decision import (
     proposed_profile_diff,
 )
 from backend.specialists.liveness_detector import classify_liveness_text
-from backend.storage.candidate_profile import PROFILE_PATH
-from backend.storage.ground_truth import GROUND_TRUTH_PATH, GroundTruthStore
+from backend.storage.candidate_profile import resolve_profile_path
+from backend.storage.ground_truth import GroundTruthStore, resolve_ground_truth_path
 
 log = structlog.get_logger()
+
+NO_ADAPTER_HINT = (
+    "No adapter found for this site. Add a site-specific adapter or platform catalog entry, "
+    "or paste a supported ATS/job-board URL directly."
+)
 
 
 def _latex_retryable(exc: Exception) -> bool:
@@ -261,6 +266,8 @@ class Orchestrator:
         jobs_applied = 0
         page = None
         try:
+            await self._stage("resolving_adapter", "Looking for a site adapter")
+            adapter = dispatch_adapter(career_url)
             await self._stage("opening_browser", "Opening browser")
             try:
                 page = await asyncio.wait_for(browser.new_page(), timeout=30.0)
@@ -274,7 +281,6 @@ class Orchestrator:
                 self.app_state.alarm.active_page = page
             except Exception:
                 pass
-            adapter = dispatch_adapter(career_url)
             await self._stage("listing_jobs", f"Listing jobs on {urlparse(career_url).hostname or 'career page'}")
             listings = await self._retry_stage(
                 "listing_jobs",
@@ -718,13 +724,15 @@ class Orchestrator:
                     )
                     human_passed = bool(classifier_review.get("passed"))
                     fit_decision_payload = classifier_review.get("decision_payload") or strict_fit_payload
-                    _append_classifier_agent_signal(
-                        listing=listing,
-                        description=description,
-                        score=score,
-                        sut_decision=classifier_threshold_decision,
-                        decision_payload=fit_decision_payload,
-                    )
+                    if not classifier_review.get("feedback_recorded"):
+                        _append_classifier_agent_signal(
+                            listing=listing,
+                            description=description,
+                            score=score,
+                            sut_decision=classifier_threshold_decision,
+                            decision_payload=fit_decision_payload,
+                            human_passed=human_passed,
+                        )
                 if not human_passed:
                     filtered_outcome = _filtered_outcome_from_review(fit_decision_payload, classifier_threshold_decision)
                     provenance = {
@@ -851,76 +859,42 @@ class Orchestrator:
                         self._event_envelope("document_requirements", stage="enumerated_fields", message="Document requirements detected", outcome="ready", url=listing.url, resume_needed=resume_needed, cover_letter_needed=cover_needed),
                     )
 
+                    # Launch document generation concurrently with form filling.
+                    # User contract: form filling happens sequentially (one
+                    # field at a time, awaited).  The ONLY thing we run in
+                    # parallel is the document compile — the
+                    # _await_pending_document_tasks gate inside FormFiller
+                    # blocks Submit until this task finishes AND the resume
+                    # is verified as attached, so we never click Submit on a
+                    # half-baked form.
+                    document_paths: dict = {"resume_path": None, "cover_letter_path": None}
+                    doc_task: asyncio.Task | None = None
                     if resume_needed or cover_needed:
-                        await self._stage("building_resume_context", f"Tailoring resume content for {role_label}")
-                        builder = ResumeContextBuilder(self.app_state.encoder, self.app_state.generator)
-                        resume_context = await builder.build(description)
-                        if listing.company:
-                            resume_context.setdefault("job_meta", {})["company"] = listing.company
-                        if listing.title_preview:
-                            resume_context.setdefault("job_meta", {})["role_title"] = listing.title_preview
-                            resume_context["tagline"] = _tagline_for_role(listing.title_preview, description)
-                            resume_context["profile_paragraph"] = _retarget_profile(
-                                resume_context.get("profile_paragraph", ""),
-                                listing.title_preview,
-                                listing.company,
+                        await self._stage(
+                            "filling_and_resume_parallel",
+                            f"Filling form sequentially while resume compiles in the background for {role_label}",
+                        )
+                        doc_task = asyncio.create_task(
+                            self._generate_documents_bg(
+                                resume_needed=resume_needed,
+                                cover_needed=cover_needed,
+                                description=description,
+                                listing=listing,
+                                out_dir=out_dir,
+                                document_paths=document_paths,
+                                artifact_paths=artifact_paths,
+                                fallback_reasons=fallback_reasons,
+                                role_label=role_label,
                             )
-
-                    if resume_needed and resume_context is not None:
-                        try:
-                            await self._stage("generating_resume", f"Generating tailored resume PDF for {role_label}")
-                            tex_path = ResumeAssembler(ROOT_DIR / "templates" / "resume" / "resume.tex.jinja").render_to_file(resume_context, out_dir / "resume.tex")
-                            resume_path = await self._compile_document(compile_latex, tex_path, out_dir, stage="generating_resume")
-                        except Exception as exc:
-                            log.exception("resume_generation_failed", job_url=listing.url, error=str(exc))
-                            fallback = create_fallback_artifact(out_dir, stem="resume", reason=f"resume_generation_failed: {exc}", reason_code="resume_generation_failed")
-                            resume_path = fallback["pdf_path"]
-                            artifact_paths["resume_fallback_reason_path"] = fallback["reason_path"]
-                            fallback_reasons.append({"artifact": "resume", "reason_code": "resume_generation_failed", "message": str(exc), "reason_path": fallback["reason_path"]})
-                            await self.app_state.stream.publish(
-                                "progress",
-                                self._event_envelope("artifact_fallback", stage="generating_resume", message="Resume fallback artifact created", outcome="degraded", error_code="resume_generation_failed", url=listing.url, artifact="resume", reason_code="resume_generation_failed", fallback_path=resume_path, fallback_reason_path=fallback["reason_path"]),
-                            )
-
-                    if cover_needed and resume_context is not None:
-                        try:
-                            await self._stage("generating_cover_letter", "Generating cover letter")
-                            cover_payload = await CoverLetterWriter(self.app_state.generator).build(
-                                resume_context["job_meta"],
-                                _candidate_evidence_block(resume_context),
-                                _earliest_start_date(),
-                            )
-                            cover_context = {
-                                "sender": resume_context.get("personal", {}),
-                                "company_name": resume_context["job_meta"].get("company") or listing.company or "Hiring Team",
-                                **cover_payload,
-                            }
-                            cover_tex = CoverLetterAssembler().render_to_file(cover_context, out_dir / "cover.tex")
-                            cover_letter_path = await self._compile_document(compile_cover_latex, cover_tex, out_dir, stage="generating_cover_letter")
-                        except Exception as exc:
-                            log.exception("cover_letter_generation_failed", job_url=listing.url, error=str(exc))
-                            fallback = create_fallback_artifact(out_dir, stem="cover-letter", reason=f"cover_letter_generation_failed: {exc}", reason_code="cover_letter_generation_failed")
-                            cover_letter_path = fallback["pdf_path"]
-                            artifact_paths["cover_letter_fallback_reason_path"] = fallback["reason_path"]
-                            fallback_reasons.append({"artifact": "cover_letter", "reason_code": "cover_letter_generation_failed", "message": str(exc), "reason_path": fallback["reason_path"]})
-                            await self.app_state.stream.publish(
-                                "progress",
-                                self._event_envelope("artifact_fallback", stage="generating_cover_letter", message="Cover letter fallback artifact created", outcome="degraded", error_code="cover_letter_generation_failed", url=listing.url, artifact="cover_letter", reason_code="cover_letter_generation_failed", fallback_path=cover_letter_path, fallback_reason_path=fallback["reason_path"]),
-                            )
+                        )
+                        document_paths["_doc_task"] = doc_task
+                    else:
+                        await self._stage(
+                            "filling_form",
+                            f"Filling form sequentially for {role_label}",
+                        )
 
                     warnings = _validation_warnings(form_fields_answered)
-                    approval_company = (
-                        (resume_context["job_meta"].get("company") if resume_context else None)
-                        or listing.company
-                    )
-                    approval_title = (
-                        (resume_context["job_meta"].get("role_title") if resume_context else None)
-                        or listing.title_preview
-                    )
-                    document_paths = {
-                        "resume_path": resume_path,
-                        "cover_letter_path": cover_letter_path,
-                    }
                     fill_outcome = await filler.run(
                         page=page,
                         adapter=listing_adapter,
@@ -938,13 +912,14 @@ class Orchestrator:
                         document_paths=document_paths,
                         approval_details={
                             "approval_token": f"{run_id}:{_safe_slug(listing.url)}",
-                            "company": approval_company,
-                            "title": approval_title,
+                            "company": listing.company,
+                            "title": listing.title_preview,
                             "job_url": listing.url,
                             "classifier_score": score,
                             "description_text": description,
-                            "resume_path": resume_path,
-                            "cover_letter_path": cover_letter_path,
+                            "resume_path": None,
+                            "cover_letter_path": None,
+                            "document_paths": document_paths,
                             "resume_needed": resume_needed,
                             "cover_letter_needed": cover_needed,
                             "validation_warnings": warnings,
@@ -954,6 +929,15 @@ class Orchestrator:
                             "auto_submit_without_approval": config.auto_submit_without_approval_enabled(),
                         },
                     )
+
+                    # Ensure doc generation finished (it should be done by now,
+                    # but guard for fast forms that submitted before LLM returned).
+                    if doc_task is not None and not doc_task.done():
+                        log.info("waiting_for_doc_gen_task_after_fill")
+                        resume_context = await doc_task
+                    elif doc_task is not None:
+                        resume_context = doc_task.result() if not doc_task.cancelled() else {}
+
                     page = fill_outcome.page
                     form_fields_answered = fill_outcome.field_answers
                     submitted = fill_outcome.submitted
@@ -1132,6 +1116,11 @@ class Orchestrator:
             )
             self.app_state.sqlite.finish_run(run_id, final_status)
             self.state.state = final_status
+        except NoAdapterFoundError as exc:
+            log.info("run_no_adapter_found", run_id=run_id, career_url=career_url, error=str(exc))
+            self.app_state.sqlite.finish_run(run_id, "error")
+            self.state.state = "error"
+            await self._publish_failure("adapter_dispatch", exc, category="adapter_not_found", hint=NO_ADAPTER_HINT)
         except Exception as exc:
             log.exception("run_failed", run_id=run_id, error=str(exc))
             self.app_state.sqlite.finish_run(run_id, "error")
@@ -1336,6 +1325,86 @@ class Orchestrator:
         )
         return path
 
+    async def _generate_documents_bg(
+        self,
+        *,
+        resume_needed: bool,
+        cover_needed: bool,
+        description: str,
+        listing: Any,
+        out_dir: Path,
+        document_paths: dict,
+        artifact_paths: dict,
+        fallback_reasons: list,
+        role_label: str,
+    ) -> dict:
+        """Build resume and/or cover letter concurrently with form filling.
+
+        Writes results directly into document_paths so _ensure_resume_document
+        in the filler can see them as soon as they're ready.  Returns the
+        resume_context so the caller can use it for ATS scoring.
+        """
+        resume_context: dict | None = None
+        try:
+            if resume_needed or cover_needed:
+                log.info("doc_gen_background_started", role=role_label)
+                builder = ResumeContextBuilder(self.app_state.encoder, self.app_state.generator)
+                resume_context = await builder.build(description)
+                if listing.company:
+                    resume_context.setdefault("job_meta", {})["company"] = listing.company
+                if listing.title_preview:
+                    resume_context.setdefault("job_meta", {})["role_title"] = listing.title_preview
+                    resume_context["tagline"] = _tagline_for_role(listing.title_preview, description)
+                    resume_context["profile_paragraph"] = _retarget_profile(
+                        resume_context.get("profile_paragraph", ""),
+                        listing.title_preview,
+                        listing.company,
+                    )
+
+            if resume_needed and resume_context is not None:
+                try:
+                    tex_path = ResumeAssembler(ROOT_DIR / "templates" / "resume" / "resume.tex.jinja").render_to_file(
+                        resume_context, out_dir / "resume.tex"
+                    )
+                    resume_path = await self._compile_document(compile_latex, tex_path, out_dir, stage="generating_resume")
+                    document_paths["resume_path"] = resume_path
+                    log.info("doc_gen_resume_ready", path=resume_path)
+                except Exception as exc:
+                    log.exception("resume_generation_failed_bg", job_url=listing.url, error=str(exc))
+                    fallback = create_fallback_artifact(out_dir, stem="resume", reason=f"resume_generation_failed: {exc}", reason_code="resume_generation_failed")
+                    document_paths["resume_path"] = fallback["pdf_path"]
+                    artifact_paths["resume_fallback_reason_path"] = fallback["reason_path"]
+                    fallback_reasons.append({"artifact": "resume", "reason_code": "resume_generation_failed", "message": str(exc), "reason_path": fallback["reason_path"]})
+
+            if cover_needed and resume_context is not None:
+                try:
+                    cover_payload = await CoverLetterWriter(self.app_state.generator).build(
+                        resume_context["job_meta"],
+                        _candidate_evidence_block(resume_context),
+                        _earliest_start_date(),
+                    )
+                    cover_context = {
+                        "sender": resume_context.get("personal", {}),
+                        "company_name": resume_context["job_meta"].get("company") or listing.company or "Hiring Team",
+                        **cover_payload,
+                    }
+                    cover_tex = CoverLetterAssembler().render_to_file(cover_context, out_dir / "cover.tex")
+                    cover_path = await self._compile_document(compile_cover_latex, cover_tex, out_dir, stage="generating_cover_letter")
+                    document_paths["cover_letter_path"] = cover_path
+                    log.info("doc_gen_cover_ready", path=cover_path)
+                except Exception as exc:
+                    log.exception("cover_letter_generation_failed_bg", job_url=listing.url, error=str(exc))
+                    fallback = create_fallback_artifact(out_dir, stem="cover-letter", reason=f"cover_letter_generation_failed: {exc}", reason_code="cover_letter_generation_failed")
+                    document_paths["cover_letter_path"] = fallback["pdf_path"]
+                    artifact_paths["cover_letter_fallback_reason_path"] = fallback["reason_path"]
+                    fallback_reasons.append({"artifact": "cover_letter", "reason_code": "cover_letter_generation_failed", "message": str(exc), "reason_path": fallback["reason_path"]})
+
+        except Exception as exc:
+            log.exception("doc_gen_background_failed", error=str(exc))
+        finally:
+            document_paths.pop("_doc_task", None)
+        return resume_context or {}
+
     async def _compile_document(self, compile_fn, tex_path: Path, out_dir: Path, *, stage: str) -> str:
         async def wrapped():
             try:
@@ -1478,7 +1547,7 @@ def _build_fit_decision_payload(
 ) -> dict[str, Any]:
     score = float(classifier_details.get("score") or 0.0)
     try:
-        facts = load_candidate_fit_facts(ground_truth_path=GROUND_TRUTH_PATH, profile_path=PROFILE_PATH)
+        facts = load_candidate_fit_facts(ground_truth_path=resolve_ground_truth_path(), profile_path=resolve_profile_path())
         decision = decide_fit(
             title=str(getattr(listing, "title_preview", "") or ""),
             jd_text=description,
@@ -1920,6 +1989,7 @@ def _append_classifier_agent_signal(
     score: float,
     sut_decision: str,
     decision_payload: dict[str, Any],
+    human_passed: bool | None = None,
 ) -> None:
     try:
         rule_b = decision_payload.get("rule_b") if isinstance(decision_payload.get("rule_b"), dict) else {}
@@ -1941,6 +2011,7 @@ def _append_classifier_agent_signal(
             company=listing.company,
             regions_matched=regions_matched,
             jd_min_years=decision_payload.get("jd_min_years"),
+            review_label="pass" if human_passed is True else "fail" if human_passed is False else None,
         )
     except Exception as exc:
         log.warning("classifier_agent_signal_append_failed", job_url=getattr(listing, "url", None), error=str(exc))

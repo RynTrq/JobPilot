@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from backend.config import DATA_DIR
+from backend.config import DATA_DIR, GROUND_TRUTH_DIR
 from backend.models.classifier_feedback import feedback_adjusted_score
 from backend.storage.ground_truth import GroundTruthStore
 
@@ -19,7 +19,7 @@ class Classifier:
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Classifier":
-        classifier_path = path or DATA_DIR / "classifier.pkl"
+        classifier_path = path or _classifier_model_path()
         if classifier_path.exists():
             with classifier_path.open("rb") as handle:
                 payload = pickle.load(handle)
@@ -48,10 +48,9 @@ class Classifier:
         return self.score(job_description, encoder=self._default_encoder())
 
     def _heuristic_score(self, job_description: str) -> float:
+        import re as _re
         text = job_description.lower()
         gt = GroundTruthStore().read_if_exists()
-        # Be defensive — ground truth may be missing, partial, or have user-edited
-        # fields of the wrong type. Coerce everything into safe lists/dicts.
         preferences = gt.get("preferences") or {}
         if not isinstance(preferences, dict):
             preferences = {}
@@ -76,9 +75,34 @@ class Classifier:
         ).lower()
         vocab_terms = {term for term in vocab.replace("/", " ").replace("-", " ").split() if len(term) > 2}
         hits = sum(1 for term in vocab_terms if term in text)
-        early = any(term in text for term in ["new grad", "new graduate", "fresher", "entry level", "intern"])
-        senior = any(term in text for term in ["5+ years", "7+ years", "staff engineer", "principal engineer"])
-        score = min(0.95, 0.25 + hits * 0.045 + (0.2 if early else 0.0) - (0.35 if senior else 0.0))
+        # Explicit fresher / zero-experience markers → strong positive signal
+        early_terms = [
+            "new grad", "new graduate", "fresher", "entry level", "entry-level",
+            "junior", "0+ years", "0 years", "no experience required",
+            "recent graduate", "early career", "early-career", "internship",
+            "trainee", "associate engineer", "graduate engineer", "campus hire",
+            "campus recruit", "0-1 year", "0-2 year", "0 to 1 year", "0 to 2 year",
+        ]
+        early = any(term in text for term in early_terms)
+        # Zero-to-N year ranges count as fresher-friendly
+        zero_range = bool(_re.search(r"\b0\s*[-–]\s*[1-3]\s*years?\b", text))
+        # Senior / over-experienced markers → strong negative signal
+        senior_terms = [
+            "5+ years", "6+ years", "7+ years", "8+ years", "10+ years",
+            "staff engineer", "principal engineer", "senior staff",
+            "director of", "vp of", "head of", "founding engineer",
+        ]
+        senior = any(term in text for term in senior_terms)
+        # Explicit mid-level exclusions (2+ or 3+ years required)
+        mid_required = bool(_re.search(r"\b[23]\+?\s*years?\s*(of\s+)?(professional\s+)?experience\b", text))
+        score = min(0.95,
+            0.25
+            + hits * 0.045
+            + (0.25 if early else 0.0)
+            + (0.15 if zero_range else 0.0)
+            - (0.35 if senior else 0.0)
+            - (0.15 if mid_required else 0.0)
+        )
         return max(0.05, score)
 
     @staticmethod
@@ -86,3 +110,11 @@ class Classifier:
         from backend.models.encoder import Encoder
 
         return Encoder()
+
+
+def _classifier_model_path() -> Path:
+    canonical = GROUND_TRUTH_DIR / "classifier.pkl"
+    legacy = DATA_DIR / "classifier.pkl"
+    if canonical.exists() or not legacy.exists():
+        return canonical
+    return legacy

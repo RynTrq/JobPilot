@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.api import routes_button_memory, routes_config, routes_control, routes_runtime, routes_stream
-from backend.config import DATA_DIR, GENERATOR_DISABLED, OUTPUT_DIR, validate_config
+from backend.config import DATA_DIR, GENERATOR_DISABLED, GROUND_TRUTH_DIR, OUTPUT_DIR, validate_config
 from backend.form.field_answerer import load_candidate_data, precompute_corpus_embeddings
 from backend.logging_setup import configure_logging
 from backend.llm.providers import build_daily_caps_from_env, build_provider_clients_from_env
@@ -49,9 +49,10 @@ async def lifespan(app: FastAPI):
     log.info("logging_initialized")
     # parents=True so nested DATA_DIR configurations don't crash startup.
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    GROUND_TRUTH_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     validate_config()
-    log.info("config_loaded", data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
+    log.info("config_loaded", data_dir=str(DATA_DIR), ground_truth_dir=str(GROUND_TRUTH_DIR), output_dir=str(OUTPUT_DIR))
 
     app.state.sqlite = SQLiteStore()
     if hasattr(app.state.sqlite, "maintenance"):

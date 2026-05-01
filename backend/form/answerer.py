@@ -80,8 +80,6 @@ class Answerer:
         if "sponsor" in label or "authorized" in label:
             if "no" in options:
                 return options["no"]
-            if "yes" in options and "india" in label:
-                return options["yes"]
         return None
 
     def _checkbox_decision(self, label: str) -> bool:
@@ -123,5 +121,9 @@ class Answerer:
         if "relocat" in text:
             return "Yes" if preferences.get("willing_to_relocate") else "No"
         if "sponsor" in text or "authorized" in text or "work authorization" in text:
-            return personal.get("work_auth_us") or "No - would require sponsorship outside India"
+            if "eu" in text or "europe" in text:
+                return personal.get("work_auth_eu")
+            if "us" in text or "u.s" in text or "united states" in text:
+                return personal.get("work_auth_us")
+            return personal.get("work_auth_us") or personal.get("work_auth_eu")
         return None
